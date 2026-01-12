@@ -1,0 +1,34 @@
+# 编译输出
+out/
+bin/
+target/
+*.class
+
+# IDE文件
+.idea/
+*.iml
+*.iws
+*.ipr
+.vscode/
+.settings/
+.classpath
+.project
+
+# 系统文件
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# 数据库文件（可选，如果不想提交数据文件）
+# *.dbf
+# *.dat
+
+# 日志文件
+*.log
+
+# 临时文件
+*.tmp
+*.bak
+
