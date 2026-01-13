@@ -105,7 +105,8 @@ public enum FieldType {
     VARCHAR(-1, "VARCHAR"),  // 变长字符串，-1表示变长
     CHAR(1, "CHAR"),         // 定长字符串
     DATE(8, "DATE"),         // 日期类型，8字节
-    FLOAT(8, "FLOAT");       // 浮点数，8字节
+    FLOAT(8, "FLOAT"),       // 浮点数，8字节
+    DOUBLE(8, "DOUBLE");     // 双精度浮点数，8字节
 }
 ```
 
@@ -130,6 +131,7 @@ public enum FieldType {
 - `getStorageSize()`: 计算字段在文件中的存储大小
   - INT: 固定4字节
   - FLOAT: 固定8字节
+  - DOUBLE: 固定8字节
   - VARCHAR: 4字节长度前缀 + 实际数据
   - CHAR: 固定长度
   - DATE: 变长字符串存储
@@ -640,6 +642,7 @@ INSERT INTO table_name (col1, col2) VALUES (val1, val2);
 **UPDATE**：
 ```sql
 UPDATE table_name SET col1=val1, col2=val2 [WHERE condition];
+UPDATE table_name SET col1=col1+1, col2=col2*2 [WHERE condition];  -- 支持表达式
 ```
 
 **DELETE**：
@@ -651,7 +654,10 @@ DELETE FROM table_name [WHERE condition];
 ```sql
 SELECT * FROM table_name [WHERE condition];
 SELECT col1, col2 FROM table_name [WHERE condition];
+SELECT col1 AS alias_name FROM table_name;  -- 支持列别名
 SELECT * FROM table1 JOIN table2 ON table1.id = table2.id [WHERE condition];
+SELECT COUNT(*) FROM table_name [GROUP BY col1];  -- 支持聚合函数和分组
+SELECT col1, COUNT(*) as count FROM table_name GROUP BY col1;  -- 聚合函数与分组
 ```
 
 ### WHERE条件支持
@@ -665,11 +671,19 @@ SELECT * FROM table1 JOIN table2 ON table1.id = table2.id [WHERE condition];
 - `>=`: 大于等于
 - `LIKE`: 模式匹配（支持%和_通配符）
 
+**逻辑操作符**：
+- `AND`: 逻辑与
+- `OR`: 逻辑或
+- `NOT`: 逻辑非（预留）
+- 支持括号嵌套：`(condition1 AND condition2) OR condition3`
+
 **示例**：
 ```sql
 SELECT * FROM students WHERE age > 20;
-SELECT * FROM students WHERE name LIKE 'A%';
+SELECT * FROM students WHERE name LIKE 'A%';  -- 匹配以A开头的名字
+SELECT * FROM students WHERE name LIKE '%li%';  -- 匹配包含'li'的名字
 SELECT * FROM students WHERE id = 1 AND age > 18;
+SELECT * FROM students WHERE (age > 20 AND gender = 'Female') OR id = 1;  -- 括号支持
 ```
 
 ---
@@ -746,10 +760,11 @@ SELECT * FROM students WHERE id = 1 AND age > 18;
    - 检查约束
 
 4. **高级查询**：
-   - 聚合函数（COUNT, SUM, AVG等）
-   - GROUP BY
-   - ORDER BY
-   - 子查询
+   - ✅ 聚合函数（COUNT, SUM, AVG, MAX, MIN） - **已实现**
+   - ✅ GROUP BY - **已实现**
+   - ORDER BY - 待实现
+   - 子查询 - 待实现
+   - HAVING - 待实现
 
 ### 性能优化
 
@@ -1850,37 +1865,37 @@ public class WriteAheadLog {
 }
 ```
 
-### 实现聚合函数
+### 已实现的聚合函数功能 ✅
 
-**步骤**：
+**支持的聚合函数**：
+- `COUNT(*)`: 计算行数
+- `COUNT(column)`: 计算非NULL值的数量
+- `SUM(column)`: 求和
+- `AVG(column)`: 平均值
+- `MAX(column)`: 最大值
+- `MIN(column)`: 最小值
 
-1. **扩展SELECT解析**：
-```java
-// SELECT COUNT(*), AVG(age) FROM students
-SelectStatement {
-    aggregations: [
-        {function: "COUNT", column: "*"},
-        {function: "AVG", column: "age"}
-    ]
-}
-```
+**GROUP BY支持**：
+- 支持按单列或多列分组
+- 支持与聚合函数结合使用
+- 支持表别名（如 `s.name`）
 
-2. **实现聚合函数**：
-```java
-public Object aggregate(List<Object> values, String function) {
-    switch (function) {
-        case "COUNT":
-            return values.size();
-        case "SUM":
-            return sum(values);
-        case "AVG":
-            return average(values);
-        case "MAX":
-            return max(values);
-        case "MIN":
-            return min(values);
-    }
-}
+**列别名支持**：
+- 使用 `AS` 关键字：`SELECT COUNT(*) AS total`
+- 或直接使用标识符：`SELECT COUNT(*) total`
+
+**示例**：
+```sql
+-- 统计每个学生的选课数量
+SELECT s.name, COUNT(*) as course_count
+FROM students s, enrollments e
+WHERE s.id = e.student_id
+GROUP BY s.name;
+
+-- 计算每门课程的平均分
+SELECT course_id, AVG(grade) as avg_grade
+FROM enrollments
+GROUP BY course_id;
 ```
 
 ---
@@ -2674,20 +2689,26 @@ INSERT, UPDATE, DELETE, SELECT
 
 -- 查询特性
 WHERE条件（=, !=, <, >, <=, >=, LIKE）
-JOIN（等值连接）
+WHERE条件支持AND/OR逻辑和括号嵌套
+JOIN（等值连接，支持隐式和显式JOIN）
+聚合函数：COUNT, SUM, AVG, MAX, MIN
+GROUP BY分组
+列别名（AS关键字）
+UPDATE表达式（如 age = age + 1）
+表别名（在JOIN查询中）
 ```
 
 **SQLite/MySQL/PostgreSQL支持的SQL**：
 ```sql
 -- 所有本系统支持的SQL，plus:
--- 聚合函数：COUNT, SUM, AVG, MAX, MIN
--- 分组：GROUP BY, HAVING
+-- 分组过滤：HAVING
 -- 排序：ORDER BY
 -- 限制：LIMIT, OFFSET
 -- 子查询：嵌套SELECT
 -- 联合：UNION, INTERSECT, EXCEPT
 -- 窗口函数（PostgreSQL）
 -- CTE（Common Table Expressions）
+-- 更多数据类型和约束
 ```
 
 #### 3. 性能对比
@@ -3009,6 +3030,24 @@ public class QueryCache {
 
 ---
 
-*文档版本：1.2*  
+*文档版本：1.3*  
 *最后更新：2024年*
+
+## 更新日志
+
+### v1.3 (2024)
+- ✅ 新增DOUBLE数据类型支持
+- ✅ 新增LIKE操作符支持（模式匹配）
+- ✅ 新增聚合函数支持（COUNT, SUM, AVG, MAX, MIN）
+- ✅ 新增GROUP BY子句支持
+- ✅ 新增列别名（AS）支持
+- ✅ 新增WHERE条件括号嵌套支持
+- ✅ 新增UPDATE表达式支持（如 `age = age + 1`）
+- ✅ 改进表别名处理（在JOIN查询中）
+
+### v1.2 (2024)
+- 初始版本发布
+- 基础DDL和DML支持
+- 单表和多表查询
+- 自定义文件格式
 
