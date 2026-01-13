@@ -86,17 +86,37 @@ public class SQLParser {
         }
     }
     
+    // UPDATE表达式（支持 column + number, column - number 等）
+    public static class UpdateExpression {
+        public String columnName;  // 列名（用于 column + number）
+        public String operator;    // 操作符：+, -, *, /
+        public Object value;       // 数值或null（如果是简单值，columnName为null）
+        public boolean isExpression; // 是否为表达式
+        
+        public UpdateExpression(Object value) {
+            this.value = value;
+            this.isExpression = false;
+        }
+        
+        public UpdateExpression(String columnName, String operator, Object value) {
+            this.columnName = columnName;
+            this.operator = operator;
+            this.value = value;
+            this.isExpression = true;
+        }
+    }
+    
     // UPDATE语句
     public static class UpdateStatement extends SQLStatement {
         public String tableName;
         public List<String> columnNames;
-        public List<Object> values;
+        public List<UpdateExpression> expressions;  // 改为表达式列表
         public DMLExecutor.QueryCondition whereCondition;
         
         public UpdateStatement() {
             this.type = StatementType.UPDATE;
             this.columnNames = new ArrayList<>();
-            this.values = new ArrayList<>();
+            this.expressions = new ArrayList<>();
         }
     }
     
@@ -110,19 +130,50 @@ public class SQLParser {
         }
     }
     
+    // WHERE条件组合（支持AND/OR）
+    public static class WhereCondition {
+        public enum LogicOp {
+            AND, OR
+        }
+        
+        public DMLExecutor.QueryCondition condition;  // 单个条件
+        public WhereCondition left;  // 左子树（用于组合条件）
+        public WhereCondition right;  // 右子树（用于组合条件）
+        public LogicOp logicOp;  // 逻辑运算符（AND/OR）
+        public boolean isLeaf;  // 是否为叶子节点（单个条件）
+        
+        // 单个条件构造函数
+        public WhereCondition(DMLExecutor.QueryCondition condition) {
+            this.condition = condition;
+            this.isLeaf = true;
+        }
+        
+        // 组合条件构造函数
+        public WhereCondition(WhereCondition left, LogicOp logicOp, WhereCondition right) {
+            this.left = left;
+            this.right = right;
+            this.logicOp = logicOp;
+            this.isLeaf = false;
+        }
+    }
+    
     // SELECT语句
     public static class SelectStatement extends SQLStatement {
         public List<String> columnNames;
+        public List<String> columnAliases;  // 列别名列表，与columnNames一一对应
         public List<String> tableNames;
         public java.util.Map<String, String> tableAliases; // 别名 -> 真实表名
         public List<QueryExecutor.JoinCondition> joinConditions;
-        public DMLExecutor.QueryCondition whereCondition;
+        public WhereCondition whereCondition;  // 改为支持多个条件
+        public List<String> groupByColumns;  // GROUP BY 列
         
         public SelectStatement() {
             this.type = StatementType.SELECT;
             this.columnNames = new ArrayList<>();
+            this.columnAliases = new ArrayList<>();
             this.tableNames = new ArrayList<>();
             this.tableAliases = new java.util.HashMap<>();
+            this.groupByColumns = new ArrayList<>();
         }
     }
     
@@ -321,7 +372,25 @@ public class SQLParser {
         AlterTableStatement stmt = new AlterTableStatement();
         stmt.tableName = expectIdentifier();
         
-        String alterType = expectIdentifier().toUpperCase();
+        // ADD、DROP、MODIFY、RENAME都是关键字，需要检查并消费
+        String alterType;
+        if (peekKeyword("ADD")) {
+            consume();
+            alterType = "ADD";
+        } else if (peekKeyword("DROP")) {
+            consume();
+            alterType = "DROP";
+        } else if (peekKeyword("MODIFY")) {
+            consume();
+            alterType = "MODIFY";
+        } else if (peekKeyword("RENAME")) {
+            consume();
+            alterType = "RENAME";
+        } else {
+            // 如果不是关键字，尝试作为标识符解析（向后兼容）
+            alterType = expectIdentifier().toUpperCase();
+        }
+        
         stmt.alterType = alterType;
         
         switch (alterType) {
@@ -424,9 +493,11 @@ public class SQLParser {
         while (true) {
             String columnName = expectIdentifier();
             expectOperator("=");
-            Object value = parseValue();
+            
+            // 解析UPDATE表达式（支持 column + number, column - number 等）
+            UpdateExpression expr = parseUpdateExpression();
             stmt.columnNames.add(columnName);
-            stmt.values.add(value);
+            stmt.expressions.add(expr);
             
             if (peekKeyword("WHERE")) {
                 break;
@@ -440,7 +511,7 @@ public class SQLParser {
         
         if (peekKeyword("WHERE")) {
             consume();
-            stmt.whereCondition = parseWhereCondition();
+            stmt.whereCondition = parseSingleWhereConditionForDML();
         }
         
         return stmt;
@@ -456,7 +527,7 @@ public class SQLParser {
         
         if (peekKeyword("WHERE")) {
             consume();
-            stmt.whereCondition = parseWhereCondition();
+            stmt.whereCondition = parseSingleWhereConditionForDML();
         }
         
         return stmt;
@@ -468,16 +539,43 @@ public class SQLParser {
     private SelectStatement parseSelect() {
         SelectStatement stmt = new SelectStatement();
         
-        // 解析列名（支持 alias.column 格式）
+        // 解析列名（支持 alias.column 格式、聚合函数、列别名）
         // *可能被识别为OPERATOR或PUNCTUATION，需要检查两种情况
         if (peekToken(TokenType.PUNCTUATION, "*") || peekToken(TokenType.OPERATOR, "*")) {
             consume();
             stmt.columnNames.add("*");
+            stmt.columnAliases.add(null);  // * 没有别名
         } else {
             while (true) {
-                // 支持 alias.column 格式
                 String colName;
-                if (peekToken(TokenType.IDENTIFIER) && peekToken(1, TokenType.PUNCTUATION, ".")) {
+                String colAlias = null;
+                
+                // 检查是否是聚合函数（COUNT, SUM, AVG, MAX, MIN）
+                if (peekKeyword("COUNT") || peekKeyword("SUM") || peekKeyword("AVG") || 
+                    peekKeyword("MAX") || peekKeyword("MIN")) {
+                    String funcName = consume().value;  // 消费函数名
+                    expectPunctuation("(");
+                    
+                    // 解析函数参数（可能是 * 或列名）
+                    String param;
+                    if (peekToken(TokenType.PUNCTUATION, "*") || peekToken(TokenType.OPERATOR, "*")) {
+                        consume();
+                        param = "*";
+                    } else {
+                        // 支持 alias.column 格式
+                        if (peekToken(TokenType.IDENTIFIER) && peekToken(1, TokenType.PUNCTUATION, ".")) {
+                            String alias = expectIdentifier();
+                            expectPunctuation(".");
+                            String column = expectIdentifier();
+                            param = alias + "." + column;
+                        } else {
+                            param = expectIdentifier();
+                        }
+                    }
+                    
+                    expectPunctuation(")");
+                    colName = funcName + "(" + param + ")";
+                } else if (peekToken(TokenType.IDENTIFIER) && peekToken(1, TokenType.PUNCTUATION, ".")) {
                     // 表别名.列名
                     String alias = expectIdentifier();
                     expectPunctuation(".");
@@ -487,7 +585,20 @@ public class SQLParser {
                     // 普通列名
                     colName = expectIdentifier();
                 }
+                
                 stmt.columnNames.add(colName);
+                
+                // 检查是否有列别名（AS 关键字或直接标识符）
+                if (peekKeyword("AS")) {
+                    consume();  // 消费 AS
+                    colAlias = expectIdentifier();
+                } else if (peekToken(TokenType.IDENTIFIER) && !peekKeyword("FROM") && 
+                          !peekKeyword("WHERE") && !peekKeyword("GROUP") && !peekPunctuation(",")) {
+                    // 没有AS关键字，但下一个标识符可能是别名（排除关键字和逗号）
+                    colAlias = expectIdentifier();
+                }
+                
+                stmt.columnAliases.add(colAlias);
                 
                 if (peekPunctuation(",")) {
                     consume();
@@ -505,8 +616,9 @@ public class SQLParser {
             consume();
             firstAlias = expectIdentifier();
         } else if (peekToken(TokenType.IDENTIFIER) && !peekKeyword("JOIN") && !peekKeyword("INNER") && 
-                   !peekKeyword("LEFT") && !peekKeyword("RIGHT") && !peekKeyword("WHERE")) {
-            // 没有AS关键字，但下一个标识符可能是别名
+                   !peekKeyword("LEFT") && !peekKeyword("RIGHT") && !peekKeyword("WHERE") && 
+                   !peekPunctuation(",")) {
+            // 没有AS关键字，但下一个标识符可能是别名（排除逗号，因为逗号表示隐式JOIN）
             firstAlias = expectIdentifier();
         }
         stmt.tableNames.add(firstTable);
@@ -517,8 +629,29 @@ public class SQLParser {
             stmt.tableAliases.put(firstTable, firstTable);
         }
         
-        // 解析多个JOIN
+        // 解析隐式JOIN（逗号连接的表）
         stmt.joinConditions = new ArrayList<>();
+        while (peekPunctuation(",")) {
+            consume();  // 消费逗号
+            String joinTable = expectIdentifier();
+            String joinAlias = null;
+            if (peekKeyword("AS")) {
+                consume();
+                joinAlias = expectIdentifier();
+            } else if (peekToken(TokenType.IDENTIFIER) && !peekKeyword("JOIN") && !peekKeyword("INNER") && 
+                       !peekKeyword("LEFT") && !peekKeyword("RIGHT") && !peekKeyword("WHERE") && 
+                       !peekPunctuation(",")) {
+                joinAlias = expectIdentifier();
+            }
+            stmt.tableNames.add(joinTable);
+            if (joinAlias != null) {
+                stmt.tableAliases.put(joinAlias, joinTable);
+            } else {
+                stmt.tableAliases.put(joinTable, joinTable);
+            }
+        }
+        
+        // 解析显式JOIN
         while (peekKeyword("JOIN") || peekKeyword("INNER") || peekKeyword("LEFT") || peekKeyword("RIGHT")) {
             // 跳过JOIN类型关键字
             if (peekKeyword("INNER") || peekKeyword("LEFT") || peekKeyword("RIGHT")) {
@@ -591,17 +724,177 @@ public class SQLParser {
             stmt.whereCondition = parseWhereCondition();
         }
         
+        // 解析GROUP BY子句
+        if (peekKeyword("GROUP")) {
+            consume();
+            expectKeyword("BY");
+            while (true) {
+                // 支持 alias.column 格式
+                String colName;
+                if (peekToken(TokenType.IDENTIFIER) && peekToken(1, TokenType.PUNCTUATION, ".")) {
+                    String alias = expectIdentifier();
+                    expectPunctuation(".");
+                    String column = expectIdentifier();
+                    colName = alias + "." + column;
+                } else {
+                    colName = expectIdentifier();
+                }
+                stmt.groupByColumns.add(colName);
+                
+                if (peekPunctuation(",")) {
+                    consume();
+                } else {
+                    break;
+                }
+            }
+        }
+        
         return stmt;
     }
     
     /**
-     * 解析WHERE条件
+     * 解析WHERE条件（支持多个AND/OR条件，支持括号）
      */
-    private DMLExecutor.QueryCondition parseWhereCondition() {
-        String columnName = expectIdentifier();
-        String operator = expectOperator();
+    private WhereCondition parseWhereCondition() {
+        // 解析第一个条件（可能是括号表达式或单个条件）
+        WhereCondition left = parseWhereConditionOrExpression();
+        
+        // 解析后续的AND/OR条件
+        while (peekKeyword("AND") || peekKeyword("OR")) {
+            WhereCondition.LogicOp logicOp = peekKeyword("AND") ? WhereCondition.LogicOp.AND : WhereCondition.LogicOp.OR;
+            consume();  // 消费AND或OR
+            WhereCondition right = parseWhereConditionOrExpression();
+            left = new WhereCondition(left, logicOp, right);
+        }
+        
+        return left;
+    }
+    
+    /**
+     * 解析WHERE条件或括号表达式
+     */
+    private WhereCondition parseWhereConditionOrExpression() {
+        // 如果遇到左括号，递归解析括号内的条件
+        if (peekPunctuation("(")) {
+            consume();  // 消费左括号
+            WhereCondition condition = parseWhereCondition();  // 递归解析括号内的条件
+            expectPunctuation(")");  // 消费右括号
+            return condition;
+        } else {
+            // 否则解析单个条件
+            return parseSingleWhereCondition();
+        }
+    }
+    
+    /**
+     * 解析单个WHERE条件（支持 table.column 或 alias.column 格式）
+     */
+    private WhereCondition parseSingleWhereCondition() {
+        String columnName;
+        
+        // 支持 table.column 或 alias.column 格式
+        if (peekToken(TokenType.IDENTIFIER) && peekToken(1, TokenType.PUNCTUATION, ".")) {
+            String tableRef = expectIdentifier();
+            expectPunctuation(".");
+            String column = expectIdentifier();
+            columnName = tableRef + "." + column;
+        } else {
+            // 普通列名
+            columnName = expectIdentifier();
+        }
+        
+        // 解析操作符（支持 LIKE 关键字）
+        String operator;
+        if (peekKeyword("LIKE")) {
+            consume();  // 消费 LIKE 关键字
+            operator = "LIKE";
+        } else {
+            operator = expectOperator();
+        }
+        
+        // 对于等号操作符，检查右侧是否是列名（table.column格式）而不是值
+        Object value;
+        if (operator.equals("=") && peekToken(TokenType.IDENTIFIER) && 
+            peekToken(1, TokenType.PUNCTUATION, ".")) {
+            // 右侧是列名（table.column格式）
+            String rightTableRef = expectIdentifier();
+            expectPunctuation(".");
+            String rightColumn = expectIdentifier();
+            value = rightTableRef + "." + rightColumn;
+        } else {
+            // 右侧是值（字符串、数字、NULL等）
+            value = parseValue();
+        }
+        
+        DMLExecutor.QueryCondition condition = new DMLExecutor.QueryCondition(columnName, operator, value);
+        return new WhereCondition(condition);
+    }
+    
+    /**
+     * 解析单个WHERE条件（用于UPDATE和DELETE，返回DMLExecutor.QueryCondition）
+     */
+    private DMLExecutor.QueryCondition parseSingleWhereConditionForDML() {
+        String columnName;
+        
+        // 支持 table.column 格式（虽然UPDATE/DELETE通常是单表，但为了兼容性支持）
+        if (peekToken(TokenType.IDENTIFIER) && peekToken(1, TokenType.PUNCTUATION, ".")) {
+            String tableRef = expectIdentifier();
+            expectPunctuation(".");
+            String column = expectIdentifier();
+            columnName = tableRef + "." + column;
+        } else {
+            // 普通列名
+            columnName = expectIdentifier();
+        }
+        
+        // 解析操作符（支持 LIKE 关键字）
+        String operator;
+        if (peekKeyword("LIKE")) {
+            consume();  // 消费 LIKE 关键字
+            operator = "LIKE";
+        } else {
+            operator = expectOperator();
+        }
+        
         Object value = parseValue();
+        
         return new DMLExecutor.QueryCondition(columnName, operator, value);
+    }
+    
+    /**
+     * 解析UPDATE表达式（支持 column + number, column - number 等）
+     */
+    private UpdateExpression parseUpdateExpression() {
+        // 检查是否是表达式：column operator number
+        if (peekToken(TokenType.IDENTIFIER)) {
+            Token nextToken = peekToken(1);
+            
+            // 如果下一个token是操作符（+, -, *, /），且再下一个是数字，则是表达式
+            if (nextToken != null && 
+                (nextToken.type == TokenType.OPERATOR || nextToken.type == TokenType.PUNCTUATION) &&
+                (nextToken.value.equals("+") || nextToken.value.equals("-") || 
+                 nextToken.value.equals("*") || nextToken.value.equals("/"))) {
+                
+                String columnName = expectIdentifier();
+                
+                // 解析操作符（应该是OPERATOR类型）
+                String operator = expectOperator();
+                
+                // 检查操作符是否是 +, -, *, /
+                if (!operator.equals("+") && !operator.equals("-") && 
+                    !operator.equals("*") && !operator.equals("/")) {
+                    throw new SQLException("Unsupported operator in expression: " + operator);
+                }
+                
+                // 解析数字值
+                Object value = parseValue();
+                return new UpdateExpression(columnName, operator, value);
+            }
+        }
+        
+        // 否则是简单值
+        Object value = parseValue();
+        return new UpdateExpression(value);
     }
     
     /**
@@ -703,6 +996,17 @@ public class SQLParser {
         }
         Token token = tokens.get(pos);
         return token.type == type && token.value.equals(value);
+    }
+    
+    /**
+     * 查看指定偏移量的token（返回Token对象）
+     */
+    private Token peekToken(int offset) {
+        int pos = currentPos + offset;
+        if (pos >= tokens.size()) {
+            return tokens.get(tokens.size() - 1); // EOF token
+        }
+        return tokens.get(pos);
     }
     
     private boolean peekKeyword(String keyword) {

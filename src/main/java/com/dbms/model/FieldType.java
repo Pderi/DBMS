@@ -8,7 +8,8 @@ public enum FieldType {
     VARCHAR(-1, "VARCHAR"),  // -1表示变长
     CHAR(1, "CHAR"),
     DATE(8, "DATE"),
-    FLOAT(8, "FLOAT");
+    FLOAT(8, "FLOAT"),
+    DOUBLE(8, "DOUBLE");  // DOUBLE类型，与FLOAT相同存储大小
     
     private final int defaultLength;
     private final String sqlName;

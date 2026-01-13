@@ -13,7 +13,10 @@ public class SQLLexer {
         "SELECT", "FROM", "WHERE", "INSERT", "INTO", "VALUES", "UPDATE", "SET",
         "DELETE", "CREATE", "TABLE", "ALTER", "DROP", "ADD", "COLUMN", "MODIFY",
         "RENAME", "TO", "AS", "AND", "OR", "NOT", "NULL", "PRIMARY", "KEY",
-        "INT", "VARCHAR", "CHAR", "DATE", "FLOAT", "JOIN", "ON", "INNER", "LEFT", "RIGHT"
+        "INT", "VARCHAR", "CHAR", "DATE", "FLOAT", "DOUBLE", "JOIN", "ON", "INNER", "LEFT", "RIGHT",
+        "LIKE",  // LIKE 操作符
+        "COUNT", "SUM", "AVG", "MAX", "MIN",  // 聚合函数
+        "GROUP", "BY"  // GROUP BY 子句
     };
     
     // Token类型
@@ -96,26 +99,7 @@ public class SQLLexer {
                 continue;
             }
             
-            // 数字
-            if (Character.isDigit(ch) || ch == '-' || ch == '+') {
-                int start = pos;
-                if (ch == '-' || ch == '+') {
-                    pos++;
-                    column++;
-                }
-                
-                while (pos < sql.length() && 
-                       (Character.isDigit(sql.charAt(pos)) || sql.charAt(pos) == '.')) {
-                    pos++;
-                    column++;
-                }
-                
-                String numStr = sql.substring(start, pos);
-                tokens.add(new Token(TokenType.NUMBER, numStr, line, column));
-                continue;
-            }
-            
-            // 操作符
+            // 操作符（必须在数字之前检查，避免将 + 和 - 识别为数字的一部分）
             if (isOperator(ch)) {
                 StringBuilder op = new StringBuilder();
                 op.append(ch);
@@ -135,6 +119,23 @@ public class SQLLexer {
                 }
                 
                 tokens.add(new Token(TokenType.OPERATOR, op.toString(), line, column));
+                continue;
+            }
+            
+            // 数字（在操作符之后检查，避免将 + 和 - 识别为数字的一部分）
+            if (Character.isDigit(ch)) {
+                int start = pos;
+                pos++;
+                column++;
+                
+                while (pos < sql.length() && 
+                       (Character.isDigit(sql.charAt(pos)) || sql.charAt(pos) == '.')) {
+                    pos++;
+                    column++;
+                }
+                
+                String numStr = sql.substring(start, pos);
+                tokens.add(new Token(TokenType.NUMBER, numStr, line, column));
                 continue;
             }
             

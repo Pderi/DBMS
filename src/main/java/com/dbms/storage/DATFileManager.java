@@ -50,7 +50,10 @@ public class DATFileManager {
      */
     public static void writeRecord(RandomAccessFile raf, Record record, Table table) throws IOException {
         // 写入记录状态（4字节）
-        raf.writeInt(record.isDeleted() ? FileFormat.RECORD_DELETED : FileFormat.RECORD_ACTIVE);
+        int status = record.isDeleted() ? FileFormat.RECORD_DELETED : FileFormat.RECORD_ACTIVE;
+        System.out.println("writeRecord: isDeleted=" + record.isDeleted() + ", status=" + status + 
+            " (RECORD_ACTIVE=" + FileFormat.RECORD_ACTIVE + ", RECORD_DELETED=" + FileFormat.RECORD_DELETED + ")");
+        raf.writeInt(status);
         
         // 写入每个字段的值
         for (int i = 0; i < table.getFieldCount(); i++) {
@@ -68,7 +71,10 @@ public class DATFileManager {
         
         // 读取记录状态
         int status = raf.readInt();
-        record.setDeleted(status == FileFormat.RECORD_DELETED);
+        boolean isDeleted = (status == FileFormat.RECORD_DELETED);
+        record.setDeleted(isDeleted);
+        System.out.println("readRecord: status=" + status + ", isDeleted=" + isDeleted + 
+            " (RECORD_ACTIVE=" + FileFormat.RECORD_ACTIVE + ", RECORD_DELETED=" + FileFormat.RECORD_DELETED + ")");
         
         // 读取每个字段的值
         for (int i = 0; i < table.getFieldCount(); i++) {
@@ -95,6 +101,7 @@ public class DATFileManager {
                 raf.writeInt((Integer) value);
                 break;
             case FLOAT:
+            case DOUBLE:
                 raf.writeDouble((Double) value);
                 break;
             case CHAR:
@@ -128,6 +135,7 @@ public class DATFileManager {
             case INT:
                 return raf.readInt();
             case FLOAT:
+            case DOUBLE:
                 return raf.readDouble();
             case CHAR:
                 return BinarySerializer.readFixedString(
@@ -164,6 +172,7 @@ public class DATFileManager {
                 raf.writeInt(0);
                 break;
             case FLOAT:
+            case DOUBLE:
                 raf.writeDouble(0.0);
                 break;
             case CHAR:
@@ -227,22 +236,42 @@ public class DATFileManager {
         // 如果文件不存在，返回空列表（新表还没有数据文件）
         File file = new File(filePath);
         if (!file.exists() || file.length() == 0) {
+            System.out.println("readAllRecords: 文件不存在或为空: " + filePath);
             return records;
         }
         
+        System.out.println("readAllRecords: 文件大小: " + file.length() + " 字节, 表字段数: " + table.getFieldCount());
+        
         try (RandomAccessFile raf = new RandomAccessFile(filePath, "r")) {
             long fileLength = raf.length();
+            int recordCount = 0;
+            int deletedCount = 0;
+            int errorCount = 0;
             
             while (raf.getFilePointer() < fileLength) {
                 try {
                     Record record = readRecord(raf, table);
+                    recordCount++;
                     if (!record.isDeleted()) {
                         records.add(record);
+                    } else {
+                        deletedCount++;
                     }
                 } catch (EOFException e) {
+                    System.out.println("readAllRecords: 遇到文件结束，当前位置: " + raf.getFilePointer() + ", 文件长度: " + fileLength);
+                    break;
+                } catch (Exception e) {
+                    errorCount++;
+                    System.err.println("readAllRecords: 读取记录失败，位置: " + raf.getFilePointer() + ", 错误: " + e.getMessage());
+                    e.printStackTrace();
+                    // 如果读取失败，尝试跳过当前记录（但这可能导致后续记录也读错）
+                    // 为了安全，我们停止读取
                     break;
                 }
             }
+            
+            System.out.println("readAllRecords: 总共读取 " + recordCount + " 条记录, 有效记录: " + records.size() + 
+                ", 已删除: " + deletedCount + ", 错误: " + errorCount);
         }
         
         return records;

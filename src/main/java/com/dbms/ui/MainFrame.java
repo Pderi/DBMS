@@ -602,13 +602,16 @@ public class MainFrame extends JFrame {
         try {
             Table table = database.getTable(tableName);
             if (table == null) {
+                System.err.println("表不存在: " + tableName);
                 dataTableModel.setRowCount(0);
                 dataTableModel.setColumnCount(0);
                 return;
             }
             
             // 执行SELECT查询
-            QueryExecutor.QueryResult result = queryExecutor.select(tableName, null, null);
+            QueryExecutor.QueryResult result = queryExecutor.select(tableName, null, null, null);
+            
+            System.out.println("查询表 [" + tableName + "] 返回 " + result.getRowCount() + " 行数据");
             
             // 更新表格模型
             String[] columnNames = result.getColumnNames().toArray(new String[0]);
@@ -624,14 +627,21 @@ public class MainFrame extends JFrame {
                     }
                     dataTableModel.addRow(rowData);
                 }
+                System.out.println("成功加载 " + result.getRowCount() + " 行数据到表格");
+            } else {
+                // 如果没有数据，确保表格列已设置
+                dataTableModel.setRowCount(0);
+                System.out.println("表 [" + tableName + "] 没有数据");
             }
         } catch (Exception e) {
             // 如果读取失败，清空表格
             dataTableModel.setRowCount(0);
             dataTableModel.setColumnCount(0);
-            // 只在控制台输出错误，不干扰用户界面
+            // 输出详细错误信息到控制台
             System.err.println("加载表数据失败 [" + tableName + "]: " + e.getMessage());
             e.printStackTrace();
+            // 也在结果区域显示错误（如果用户需要）
+            // 注意：这里不显示对话框，因为可能会在自动刷新时频繁弹出
         }
     }
     
@@ -729,34 +739,35 @@ public class MainFrame extends JFrame {
         
         // 刷新表格显示 - 如果执行了INSERT/UPDATE/DELETE，自动刷新当前表的数据
         String selectedTable = tableList.getSelectedValue();
-        if (selectedTable != null) {
-            showTableStructure(selectedTable);
-            // 如果最后执行的不是SELECT，刷新表数据
-            if (lastQueryResult == null) {
+        System.out.println("准备刷新表数据，选中表: " + selectedTable + ", lastQueryResult: " + lastQueryResult);
+        
+        // 如果最后执行的不是SELECT，需要刷新表数据
+        if (lastQueryResult == null) {
+            String tableToRefresh = null;
+            if (selectedTable != null) {
+                tableToRefresh = selectedTable;
+            } else if (!tableListModel.isEmpty()) {
+                // 如果没有选中表，但表列表不为空，选中第一个表
+                tableList.setSelectedIndex(0);
+                tableToRefresh = tableList.getSelectedValue();
+            }
+            
+            if (tableToRefresh != null) {
+                System.out.println("刷新表数据: " + tableToRefresh);
+                showTableStructure(tableToRefresh);
+                // 同步刷新表数据（确保在数据写入完成后立即刷新）
                 try {
-                    showTableData(selectedTable);
+                    showTableData(tableToRefresh);
                 } catch (Exception e) {
                     // 刷新表数据失败不影响SQL执行结果，只记录错误
-                    System.err.println("刷新表数据失败: " + e.getMessage());
+                    System.err.println("刷新表数据失败 [" + tableToRefresh + "]: " + e.getMessage());
                     e.printStackTrace();
                 }
+            } else {
+                System.out.println("没有可刷新的表");
             }
-        } else if (!tableListModel.isEmpty()) {
-            // 如果没有选中表，但表列表不为空，选中第一个表
-            tableList.setSelectedIndex(0);
-            String firstTable = tableList.getSelectedValue();
-            if (firstTable != null) {
-                showTableStructure(firstTable);
-                if (lastQueryResult == null) {
-                    try {
-                        showTableData(firstTable);
-                    } catch (Exception e) {
-                        // 刷新表数据失败不影响SQL执行结果，只记录错误
-                        System.err.println("刷新表数据失败: " + e.getMessage());
-                        e.printStackTrace();
-                    }
-                }
-            }
+        } else {
+            System.out.println("跳过刷新，因为 lastQueryResult 不为 null");
         }
         
         // 只有在SQL语句执行失败时才显示警告

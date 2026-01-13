@@ -22,6 +22,7 @@ public class TypeConverter {
                 case INT:
                     return Integer.parseInt(value);
                 case FLOAT:
+                case DOUBLE:
                     return Double.parseDouble(value);
                 case VARCHAR:
                 case CHAR:
@@ -47,9 +48,27 @@ public class TypeConverter {
         
         switch (type) {
             case INT:
-                return value instanceof Integer;
+                // INT类型接受Integer，也接受可以转换为Integer的数字类型
+                if (value instanceof Integer) {
+                    return true;
+                }
+                // 允许Long、Short、Byte等整数类型
+                if (value instanceof Long || value instanceof Short || value instanceof Byte) {
+                    return true;
+                }
+                // 允许Double或Float，如果它们可以无损转换为Integer
+                if (value instanceof Double || value instanceof Float) {
+                    Number num = (Number) value;
+                    double d = num.doubleValue();
+                    // 检查是否在Integer范围内且是整数
+                    return d >= Integer.MIN_VALUE && d <= Integer.MAX_VALUE && 
+                           d == Math.floor(d);
+                }
+                return false;
             case FLOAT:
-                return value instanceof Double || value instanceof Float;
+            case DOUBLE:
+                return value instanceof Double || value instanceof Float || 
+                       value instanceof Integer || value instanceof Long;
             case VARCHAR:
             case CHAR:
                 if (value instanceof String) {

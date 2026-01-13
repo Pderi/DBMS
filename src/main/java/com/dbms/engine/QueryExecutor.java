@@ -3,6 +3,7 @@ package com.dbms.engine;
 import com.dbms.model.Field;
 import com.dbms.model.Record;
 import com.dbms.model.Table;
+import com.dbms.parser.SQLParser;
 import com.dbms.storage.DATFileManager;
 import com.dbms.util.DBMSException;
 
@@ -35,7 +36,8 @@ public class QueryExecutor {
      * 单表查询
      */
     public QueryResult select(String tableName, List<String> columnNames, 
-                             DMLExecutor.QueryCondition condition) {
+                             SQLParser.WhereCondition whereCondition,
+                             List<String> groupByColumns) {
         Table table = ddlExecutor.getTable(tableName);
         if (table == null) {
             throw new DBMSException("Table " + tableName + " does not exist");
@@ -50,23 +52,67 @@ public class QueryExecutor {
                 .collect(Collectors.toList());
         }
         
-        // 验证字段名
+        // 检查是否有聚合函数
+        boolean hasAggregate = false;
         for (String colName : selectedColumns) {
-            if (table.getFieldByName(colName) == null) {
+            if (colName.toUpperCase().startsWith("COUNT(") || 
+                colName.toUpperCase().startsWith("SUM(") ||
+                colName.toUpperCase().startsWith("AVG(") ||
+                colName.toUpperCase().startsWith("MAX(") ||
+                colName.toUpperCase().startsWith("MIN(")) {
+                hasAggregate = true;
+                break;
+            }
+        }
+        
+        // 验证字段名（跳过聚合函数）
+        for (String colName : selectedColumns) {
+            // 跳过聚合函数
+            if (colName.toUpperCase().startsWith("COUNT(") || 
+                colName.toUpperCase().startsWith("SUM(") ||
+                colName.toUpperCase().startsWith("AVG(") ||
+                colName.toUpperCase().startsWith("MAX(") ||
+                colName.toUpperCase().startsWith("MIN(")) {
+                continue;
+            }
+            // 支持 table.column 格式
+            String actualColName = colName;
+            if (colName.contains(".")) {
+                String[] parts = colName.split("\\.", 2);
+                actualColName = parts[1];
+            }
+            if (table.getFieldByName(actualColName) == null) {
                 throw new DBMSException("Column " + colName + " does not exist");
             }
         }
         
         try {
             String tableDataFile = getTableDataFilePath(tableName);
+            System.out.println("SELECT: 从文件读取数据: " + tableDataFile);
             List<Record> allRecords = DATFileManager.readAllRecords(tableDataFile, table);
+            System.out.println("SELECT: 读取到 " + allRecords.size() + " 条记录");
             
             // 过滤记录
             List<Record> filteredRecords = new ArrayList<>();
             for (Record record : allRecords) {
-                if (condition == null || condition.matches(record, table)) {
+                // 将Record转换为List<Object>以便使用matchesWhereCondition
+                List<Object> row = new ArrayList<>();
+                for (Field field : table.getFields()) {
+                    row.add(record.getValue(table, field.getName()));
+                }
+                
+                // 创建单表列表用于条件匹配
+                List<Table> tables = new ArrayList<>();
+                tables.add(table);
+                
+                if (whereCondition == null || matchesWhereCondition(row, tables, whereCondition)) {
                     filteredRecords.add(record);
                 }
+            }
+            
+            // 如果有聚合函数或GROUP BY，执行聚合查询
+            if (hasAggregate || (groupByColumns != null && !groupByColumns.isEmpty())) {
+                return executeAggregateQuery(table, filteredRecords, selectedColumns, groupByColumns);
             }
             
             // 投影（选择指定字段）
@@ -74,7 +120,13 @@ public class QueryExecutor {
             for (Record record : filteredRecords) {
                 List<Object> row = new ArrayList<>();
                 for (String colName : selectedColumns) {
-                    row.add(record.getValue(table, colName));
+                    // 支持 table.column 格式
+                    String actualColName = colName;
+                    if (colName.contains(".")) {
+                        String[] parts = colName.split("\\.", 2);
+                        actualColName = parts[1];
+                    }
+                    row.add(record.getValue(table, actualColName));
                 }
                 resultData.add(row);
             }
@@ -91,7 +143,9 @@ public class QueryExecutor {
      */
     public QueryResult join(List<String> tableNames, List<String> columnNames,
                            List<JoinCondition> joinConditions,
-                           DMLExecutor.QueryCondition whereCondition) {
+                           SQLParser.WhereCondition whereCondition,
+                           List<String> groupByColumns,
+                           java.util.Map<String, String> tableAliases) {
         if (tableNames.size() < 2) {
             throw new DBMSException("Join requires at least 2 tables");
         }
@@ -116,8 +170,33 @@ public class QueryExecutor {
             }
         }
         
+        // 处理隐式JOIN：如果没有显式JOIN条件，从WHERE子句中提取连接条件
+        List<JoinCondition> effectiveJoinConditions = new ArrayList<>(joinConditions != null ? joinConditions : new ArrayList<>());
+        if (effectiveJoinConditions.isEmpty() && whereCondition != null) {
+            // 从WHERE条件中提取等值连接条件（table1.column1 = table2.column2）
+            extractJoinConditionsFromWhere(whereCondition, tableNames, effectiveJoinConditions);
+        }
+        
         // 执行连接
-        List<List<Object>> fullResultData = performJoin(tables, tableRecords, joinConditions, whereCondition);
+        List<List<Object>> fullResultData = performJoin(tables, tableRecords, effectiveJoinConditions, whereCondition);
+        
+        // 检查是否有聚合函数
+        boolean hasAggregate = false;
+        for (String colName : columnNames) {
+            if (colName.toUpperCase().startsWith("COUNT(") || 
+                colName.toUpperCase().startsWith("SUM(") ||
+                colName.toUpperCase().startsWith("AVG(") ||
+                colName.toUpperCase().startsWith("MAX(") ||
+                colName.toUpperCase().startsWith("MIN(")) {
+                hasAggregate = true;
+                break;
+            }
+        }
+        
+        // 如果有聚合函数或GROUP BY，执行聚合查询
+        if (hasAggregate || (groupByColumns != null && !groupByColumns.isEmpty())) {
+            return executeAggregateQueryForJoin(tables, fullResultData, columnNames, groupByColumns, tableAliases);
+        }
         
         // 处理列名（支持 alias.column 格式）
         List<String> selectedColumns = columnNames;
@@ -148,11 +227,65 @@ public class QueryExecutor {
     }
     
     /**
+     * 从WHERE条件中提取等值连接条件（用于隐式JOIN）
+     * 识别形如 table1.column1 = table2.column2 的条件
+     */
+    private void extractJoinConditionsFromWhere(SQLParser.WhereCondition whereCondition, 
+                                                 List<String> tableNames,
+                                                 List<JoinCondition> joinConditions) {
+        if (whereCondition == null) {
+            return;
+        }
+        
+        if (whereCondition.isLeaf) {
+            // 单个条件：检查是否为等值连接条件（table1.column1 = table2.column2）
+            DMLExecutor.QueryCondition cond = whereCondition.condition;
+            if (cond != null && cond.operator.equals("=")) {
+                // 检查列名和值是否都是 table.column 格式
+                String leftCol = cond.columnName;
+                Object rightValue = cond.value;
+                
+                // 如果值是字符串且包含点号，可能是列名（不是字符串字面量）
+                if (rightValue instanceof String) {
+                    String rightCol = (String) rightValue;
+                    // 排除字符串字面量（用引号包围的）
+                    if (rightCol.contains(".") && !rightCol.startsWith("'") && !rightCol.endsWith("'")) {
+                        // 检查左右两边是否都是 table.column 格式
+                        if (leftCol.contains(".")) {
+                            String[] leftParts = leftCol.split("\\.", 2);
+                            String[] rightParts = rightCol.split("\\.", 2);
+                            if (leftParts.length == 2 && rightParts.length == 2) {
+                                String leftTable = leftParts[0];
+                                String leftColumn = leftParts[1];
+                                String rightTable = rightParts[0];
+                                String rightColumn = rightParts[1];
+                                
+                                // 检查两个表是否都在查询中（支持表名或别名）
+                                boolean leftTableFound = tableNames.contains(leftTable);
+                                boolean rightTableFound = tableNames.contains(rightTable);
+                                
+                                if (leftTableFound && rightTableFound && !leftTable.equals(rightTable)) {
+                                    // 这是一个等值连接条件
+                                    joinConditions.add(new JoinCondition(leftTable, leftColumn, rightTable, rightColumn));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            // 组合条件：递归处理左右子树
+            extractJoinConditionsFromWhere(whereCondition.left, tableNames, joinConditions);
+            extractJoinConditionsFromWhere(whereCondition.right, tableNames, joinConditions);
+        }
+    }
+    
+    /**
      * 执行连接操作
      */
     private List<List<Object>> performJoin(List<Table> tables, List<List<Record>> tableRecords,
                                            List<JoinCondition> joinConditions,
-                                           DMLExecutor.QueryCondition whereCondition) {
+                                           SQLParser.WhereCondition whereCondition) {
         List<List<Object>> result = new ArrayList<>();
         
         // 简单的嵌套循环连接（可以优化为哈希连接等）
@@ -189,7 +322,7 @@ public class QueryExecutor {
                         }
                         
                         // 检查WHERE条件
-                        if (whereCondition == null || matchesWhere(row, tables, whereCondition)) {
+                        if (whereCondition == null || matchesWhereCondition(row, tables, whereCondition)) {
                             result.add(row);
                         }
                     }
@@ -332,7 +465,7 @@ public class QueryExecutor {
             if (whereCondition != null) {
                 List<List<Object>> filteredResult = new ArrayList<>();
                 for (List<Object> row : intermediateResult) {
-                    if (matchesWhere(row, tables, whereCondition)) {
+                    if (matchesWhereCondition(row, tables, whereCondition)) {
                         filteredResult.add(row);
                     }
                 }
@@ -411,65 +544,120 @@ public class QueryExecutor {
     }
     
     /**
-     * 检查WHERE条件（简化实现）
+     * 检查WHERE条件（支持多个AND/OR条件）
      */
-    private boolean matchesWhere(List<Object> row, List<Table> tables, 
-                                DMLExecutor.QueryCondition condition) {
-        // 查找字段所在的表
+    private boolean matchesWhereCondition(List<Object> row, List<Table> tables, 
+                                         SQLParser.WhereCondition whereCondition) {
+        if (whereCondition == null) {
+            return true;
+        }
+        
+        if (whereCondition.isLeaf) {
+            // 单个条件
+            return matchesSingleCondition(row, tables, whereCondition.condition);
+        } else {
+            // 组合条件
+            boolean leftResult = matchesWhereCondition(row, tables, whereCondition.left);
+            boolean rightResult = matchesWhereCondition(row, tables, whereCondition.right);
+            
+            if (whereCondition.logicOp == SQLParser.WhereCondition.LogicOp.AND) {
+                return leftResult && rightResult;
+            } else {  // OR
+                return leftResult || rightResult;
+            }
+        }
+    }
+    
+    /**
+     * 检查单个WHERE条件（支持 table.column 或 alias.column 格式）
+     */
+    private boolean matchesSingleCondition(List<Object> row, List<Table> tables, 
+                                          DMLExecutor.QueryCondition condition) {
+        if (condition == null) {
+            return true;
+        }
+        
         String columnName = condition.columnName;
-        int colIndex = 0;
-        Table targetTable = null;
-        
-        for (Table table : tables) {
-            if (table.getFieldByName(columnName) != null) {
-                targetTable = table;
-                break;
-            }
-            colIndex += table.getFieldCount();
-        }
-        
-        if (targetTable == null) {
-            return false;
-        }
-        
-        // 找到列在结果中的索引
-        int resultIndex = colIndex;
-        for (Field f : targetTable.getFields()) {
-            if (f.getName().equals(columnName)) {
-                break;
-            }
-            resultIndex++;
-        }
-        
-        if (resultIndex >= row.size()) {
-            return false;
-        }
-        
-        Object rowValue = row.get(resultIndex);
         Object conditionValue = condition.value;
         
+        // 处理 table.column 或 alias.column 格式
+        Object rowValue;
+        if (columnName.contains(".")) {
+            // 使用extractColumnValue来获取值
+            rowValue = extractColumnValue(columnName, row, tables);
+        } else {
+            // 普通列名：查找字段所在的表
+            int colIndex = 0;
+            Table targetTable = null;
+            
+            for (Table table : tables) {
+                if (table.getFieldByName(columnName) != null) {
+                    targetTable = table;
+                    break;
+                }
+                colIndex += table.getFieldCount();
+            }
+            
+            if (targetTable == null) {
+                return false;
+            }
+            
+            // 找到列在结果中的索引
+            int resultIndex = colIndex;
+            for (Field f : targetTable.getFields()) {
+                if (f.getName().equals(columnName)) {
+                    break;
+                }
+                resultIndex++;
+            }
+            
+            if (resultIndex >= row.size()) {
+                return false;
+            }
+            
+            rowValue = row.get(resultIndex);
+        }
+        
+        // 处理条件值可能是另一个表的列的情况（table.column格式）
+        Object actualConditionValue = conditionValue;
+        if (conditionValue instanceof String) {
+            String valueStr = (String) conditionValue;
+            if (valueStr.contains(".") && !valueStr.startsWith("'") && !valueStr.endsWith("'")) {
+                // 可能是另一个表的列，尝试提取值
+                actualConditionValue = extractColumnValue(valueStr, row, tables);
+            }
+        }
+        
         // 简单的条件匹配
-        if (rowValue == null || conditionValue == null) {
-            return condition.operator.equals("=") && rowValue == conditionValue;
+        if (rowValue == null || actualConditionValue == null) {
+            return condition.operator.equals("=") && rowValue == actualConditionValue;
         }
         
         switch (condition.operator) {
             case "=":
-                return rowValue.equals(conditionValue);
+                // 对于数字类型，使用数值比较而不是equals
+                if (rowValue instanceof Number && actualConditionValue instanceof Number) {
+                    return compareValues(rowValue, actualConditionValue) == 0;
+                }
+                return rowValue.equals(actualConditionValue);
             case "!=":
             case "<>":
-                return !rowValue.equals(conditionValue);
+                // 对于数字类型，使用数值比较而不是equals
+                if (rowValue instanceof Number && actualConditionValue instanceof Number) {
+                    return compareValues(rowValue, actualConditionValue) != 0;
+                }
+                return !rowValue.equals(actualConditionValue);
             case "<":
-                return compareValues(rowValue, conditionValue) < 0;
+                return compareValues(rowValue, actualConditionValue) < 0;
             case ">":
-                return compareValues(rowValue, conditionValue) > 0;
+                return compareValues(rowValue, actualConditionValue) > 0;
             case "<=":
-                return compareValues(rowValue, conditionValue) <= 0;
+                return compareValues(rowValue, actualConditionValue) <= 0;
             case ">=":
-                return compareValues(rowValue, conditionValue) >= 0;
+                return compareValues(rowValue, actualConditionValue) >= 0;
             case "LIKE":
-                if (rowValue instanceof String && conditionValue instanceof String) {
-                    String pattern = ((String) conditionValue).replace("%", ".*").replace("_", ".");
+                if (rowValue instanceof String && actualConditionValue instanceof String) {
+                    String pattern = ((String) actualConditionValue).replace("%", ".*").replace("_", ".");
                     return ((String) rowValue).matches(pattern);
                 }
                 return false;
@@ -478,12 +666,295 @@ public class QueryExecutor {
         }
     }
     
-    @SuppressWarnings("unchecked")
+    /**
+     * 比较两个值（支持数字类型转换）
+     */
     private int compareValues(Object a, Object b) {
-        if (a instanceof Comparable && b instanceof Comparable) {
-            return ((Comparable<Object>) a).compareTo(b);
+        // 处理数字类型比较：统一转换为Double进行比较
+        if (a instanceof Number && b instanceof Number) {
+            double aDouble = ((Number) a).doubleValue();
+            double bDouble = ((Number) b).doubleValue();
+            return Double.compare(aDouble, bDouble);
         }
+        
+        // 处理相同类型的Comparable对象
+        if (a != null && b != null && a.getClass().equals(b.getClass()) && a instanceof Comparable) {
+            @SuppressWarnings("unchecked")
+            Comparable<Object> comparableA = (Comparable<Object>) a;
+            return comparableA.compareTo(b);
+        }
+        
+        // 其他情况：转换为字符串比较
         return a.toString().compareTo(b.toString());
+    }
+    
+    /**
+     * 执行聚合查询（单表）
+     */
+    private QueryResult executeAggregateQuery(Table table, List<Record> records, 
+                                            List<String> columnNames, List<String> groupByColumns) {
+        // 如果没有GROUP BY，整个结果集作为一个分组
+        java.util.Map<String, List<Record>> groups;
+        if (groupByColumns == null || groupByColumns.isEmpty()) {
+            groups = new java.util.HashMap<>();
+            groups.put("", records);  // 使用空字符串作为键
+        } else {
+            // 按GROUP BY列分组
+            groups = new java.util.HashMap<>();
+            for (Record record : records) {
+                StringBuilder keyBuilder = new StringBuilder();
+                for (String groupCol : groupByColumns) {
+                    String actualColName = groupCol;
+                    if (groupCol.contains(".")) {
+                        String[] parts = groupCol.split("\\.", 2);
+                        actualColName = parts[1];
+                    }
+                    Object value = record.getValue(table, actualColName);
+                    keyBuilder.append(value != null ? value.toString() : "NULL").append("|");
+                }
+                String key = keyBuilder.toString();
+                groups.computeIfAbsent(key, k -> new ArrayList<>()).add(record);
+            }
+        }
+        
+        // 对每个分组计算聚合函数
+        List<List<Object>> resultData = new ArrayList<>();
+        for (java.util.Map.Entry<String, List<Record>> entry : groups.entrySet()) {
+            List<Record> groupRecords = entry.getValue();
+            List<Object> row = new ArrayList<>();
+            
+            for (String colName : columnNames) {
+                String upperColName = colName.toUpperCase();
+                if (upperColName.startsWith("COUNT(")) {
+                    // COUNT(*)
+                    row.add((long) groupRecords.size());
+                } else if (upperColName.startsWith("SUM(")) {
+                    // SUM(column)
+                    String param = extractFunctionParam(colName);
+                    String actualColName = param.contains(".") ? param.split("\\.", 2)[1] : param;
+                    double sum = 0.0;
+                    for (Record rec : groupRecords) {
+                        Object value = rec.getValue(table, actualColName);
+                        if (value instanceof Number) {
+                            sum += ((Number) value).doubleValue();
+                        }
+                    }
+                    row.add(sum);
+                } else if (upperColName.startsWith("AVG(")) {
+                    // AVG(column)
+                    String param = extractFunctionParam(colName);
+                    String actualColName = param.contains(".") ? param.split("\\.", 2)[1] : param;
+                    double sum = 0.0;
+                    int count = 0;
+                    for (Record rec : groupRecords) {
+                        Object value = rec.getValue(table, actualColName);
+                        if (value instanceof Number) {
+                            sum += ((Number) value).doubleValue();
+                            count++;
+                        }
+                    }
+                    row.add(count > 0 ? sum / count : 0.0);
+                } else if (upperColName.startsWith("MAX(")) {
+                    // MAX(column)
+                    String param = extractFunctionParam(colName);
+                    String actualColName = param.contains(".") ? param.split("\\.", 2)[1] : param;
+                    Object max = null;
+                    for (Record rec : groupRecords) {
+                        Object value = rec.getValue(table, actualColName);
+                        if (value != null && (max == null || compareValues(value, max) > 0)) {
+                            max = value;
+                        }
+                    }
+                    row.add(max);
+                } else if (upperColName.startsWith("MIN(")) {
+                    // MIN(column)
+                    String param = extractFunctionParam(colName);
+                    String actualColName = param.contains(".") ? param.split("\\.", 2)[1] : param;
+                    Object min = null;
+                    for (Record rec : groupRecords) {
+                        Object value = rec.getValue(table, actualColName);
+                        if (value != null && (min == null || compareValues(value, min) < 0)) {
+                            min = value;
+                        }
+                    }
+                    row.add(min);
+                } else {
+                    // 普通列（GROUP BY列）
+                    String actualColName = colName;
+                    if (colName.contains(".")) {
+                        String[] parts = colName.split("\\.", 2);
+                        actualColName = parts[1];
+                    }
+                    // 对于GROUP BY列，取第一行的值（同一分组中值应该相同）
+                    if (!groupRecords.isEmpty()) {
+                        row.add(groupRecords.get(0).getValue(table, actualColName));
+                    } else {
+                        row.add(null);
+                    }
+                }
+            }
+            resultData.add(row);
+        }
+        
+        return new QueryResult(columnNames, resultData);
+    }
+    
+    /**
+     * 从聚合函数中提取参数（如 COUNT(*) -> *, SUM(age) -> age）
+     */
+    private String extractFunctionParam(String functionCall) {
+        int openParen = functionCall.indexOf('(');
+        int closeParen = functionCall.lastIndexOf(')');
+        if (openParen >= 0 && closeParen > openParen) {
+            return functionCall.substring(openParen + 1, closeParen);
+        }
+        return "";
+    }
+    
+    /**
+     * 执行聚合查询（多表JOIN）
+     */
+    private QueryResult executeAggregateQueryForJoin(List<Table> tables, List<List<Object>> joinedData,
+                                                     List<String> columnNames, List<String> groupByColumns,
+                                                     java.util.Map<String, String> tableAliases) {
+        // 如果没有GROUP BY，整个结果集作为一个分组
+        java.util.Map<String, List<List<Object>>> groups;
+        if (groupByColumns == null || groupByColumns.isEmpty()) {
+            groups = new java.util.HashMap<>();
+            groups.put("", joinedData);
+        } else {
+            // 按GROUP BY列分组
+            groups = new java.util.HashMap<>();
+            for (List<Object> row : joinedData) {
+                StringBuilder keyBuilder = new StringBuilder();
+                for (String groupCol : groupByColumns) {
+                    // 找到GROUP BY列在所有表中的位置
+                    Object value = getColumnValueFromJoinedRow(tables, row, groupCol, tableAliases);
+                    keyBuilder.append(value != null ? value.toString() : "NULL").append("|");
+                }
+                String key = keyBuilder.toString();
+                groups.computeIfAbsent(key, k -> new ArrayList<>()).add(row);
+            }
+        }
+        
+        // 对每个分组计算聚合函数
+        List<List<Object>> resultData = new ArrayList<>();
+        for (java.util.Map.Entry<String, List<List<Object>>> entry : groups.entrySet()) {
+            List<List<Object>> groupRows = entry.getValue();
+            List<Object> row = new ArrayList<>();
+            
+            for (String colName : columnNames) {
+                String upperColName = colName.toUpperCase();
+                if (upperColName.startsWith("COUNT(")) {
+                    row.add((long) groupRows.size());
+                } else if (upperColName.startsWith("SUM(")) {
+                    String param = extractFunctionParam(colName);
+                    double sum = 0.0;
+                    for (List<Object> joinedRow : groupRows) {
+                        Object value = getColumnValueFromJoinedRow(tables, joinedRow, param, tableAliases);
+                        if (value instanceof Number) {
+                            sum += ((Number) value).doubleValue();
+                        }
+                    }
+                    row.add(sum);
+                } else if (upperColName.startsWith("AVG(")) {
+                    String param = extractFunctionParam(colName);
+                    double sum = 0.0;
+                    int count = 0;
+                    for (List<Object> joinedRow : groupRows) {
+                        Object value = getColumnValueFromJoinedRow(tables, joinedRow, param, tableAliases);
+                        if (value instanceof Number) {
+                            sum += ((Number) value).doubleValue();
+                            count++;
+                        }
+                    }
+                    row.add(count > 0 ? sum / count : 0.0);
+                } else if (upperColName.startsWith("MAX(")) {
+                    String param = extractFunctionParam(colName);
+                    Object max = null;
+                    for (List<Object> joinedRow : groupRows) {
+                        Object value = getColumnValueFromJoinedRow(tables, joinedRow, param, tableAliases);
+                        if (value != null && (max == null || compareValues(value, max) > 0)) {
+                            max = value;
+                        }
+                    }
+                    row.add(max);
+                } else if (upperColName.startsWith("MIN(")) {
+                    String param = extractFunctionParam(colName);
+                    Object min = null;
+                    for (List<Object> joinedRow : groupRows) {
+                        Object value = getColumnValueFromJoinedRow(tables, joinedRow, param, tableAliases);
+                        if (value != null && (min == null || compareValues(value, min) < 0)) {
+                            min = value;
+                        }
+                    }
+                    row.add(min);
+                } else {
+                    // 普通列（GROUP BY列）
+                    Object value = getColumnValueFromJoinedRow(tables, groupRows.get(0), colName, tableAliases);
+                    row.add(value);
+                }
+            }
+            resultData.add(row);
+        }
+        
+        return new QueryResult(columnNames, resultData);
+    }
+    
+    /**
+     * 从JOIN结果行中获取指定列的值（支持 alias.column 格式）
+     */
+    private Object getColumnValueFromJoinedRow(List<Table> tables, List<Object> row, String columnName,
+                                               java.util.Map<String, String> tableAliases) {
+        // 支持 alias.column 格式
+        String tableRef = null;
+        String actualColName = columnName;
+        if (columnName.contains(".")) {
+            String[] parts = columnName.split("\\.", 2);
+            tableRef = parts[0];
+            actualColName = parts[1];
+        }
+        
+        int colOffset = 0;
+        for (int i = 0; i < tables.size(); i++) {
+            Table table = tables.get(i);
+            // 检查表名或别名是否匹配
+            boolean matches = false;
+            if (tableRef == null) {
+                // 没有表前缀，在所有表中查找
+                matches = true;
+            } else {
+                // 有表前缀，检查是否匹配表名或别名
+                if (tableRef.equals(table.getName())) {
+                    matches = true;
+                } else if (tableAliases != null) {
+                    // 检查是否是别名，如果是，获取实际表名
+                    String actualTableName = tableAliases.get(tableRef);
+                    if (actualTableName != null && actualTableName.equals(table.getName())) {
+                        matches = true;
+                    }
+                }
+            }
+            
+            if (matches) {
+                Field field = table.getFieldByName(actualColName);
+                if (field != null) {
+                    // 找到字段在表中的索引
+                    int fieldIndex = -1;
+                    for (int j = 0; j < table.getFields().size(); j++) {
+                        if (table.getFields().get(j).getName().equalsIgnoreCase(actualColName)) {
+                            fieldIndex = j;
+                            break;
+                        }
+                    }
+                    if (fieldIndex >= 0) {
+                        return row.get(colOffset + fieldIndex);
+                    }
+                }
+            }
+            colOffset += table.getFieldCount();
+        }
+        return null;
     }
     
     /**

@@ -104,7 +104,17 @@ public class SQLExecutor {
     }
     
     private String executeUpdate(UpdateStatement stmt) {
-        int count = dmlExecutor.update(stmt.tableName, stmt.columnNames, stmt.values, stmt.whereCondition);
+        // 将表达式列表转换为值列表（在执行时计算表达式）
+        java.util.List<Object> values = new java.util.ArrayList<>();
+        for (SQLParser.UpdateExpression expr : stmt.expressions) {
+            if (expr.isExpression) {
+                // 表达式将在DMLExecutor中计算，这里先传递表达式对象
+                values.add(expr);
+            } else {
+                values.add(expr.value);
+            }
+        }
+        int count = dmlExecutor.update(stmt.tableName, stmt.columnNames, values, stmt.whereCondition);
         return count + " row(s) updated";
     }
     
@@ -125,16 +135,35 @@ public class SQLExecutor {
             }
         }
         
+        // 使用列别名（如果有）或原始列名作为显示名称
+        java.util.List<String> displayColumnNames = new java.util.ArrayList<>();
+        for (int i = 0; i < processedColumnNames.size(); i++) {
+            String displayName = (stmt.columnAliases != null && i < stmt.columnAliases.size() && 
+                                 stmt.columnAliases.get(i) != null) 
+                                 ? stmt.columnAliases.get(i) 
+                                 : processedColumnNames.get(i);
+            displayColumnNames.add(displayName);
+        }
+        
+        QueryResult result;
         if (stmt.tableNames.size() == 1) {
             // 单表查询
-            return queryExecutor.select(stmt.tableNames.get(0), processedColumnNames, stmt.whereCondition);
+            result = queryExecutor.select(stmt.tableNames.get(0), processedColumnNames, 
+                                         stmt.whereCondition, stmt.groupByColumns);
         } else if (stmt.tableNames.size() >= 2) {
             // 多表连接（支持2个或更多表）
-            return queryExecutor.join(stmt.tableNames, processedColumnNames, 
-                stmt.joinConditions, stmt.whereCondition);
+            result = queryExecutor.join(stmt.tableNames, processedColumnNames, 
+                stmt.joinConditions, stmt.whereCondition, stmt.groupByColumns, stmt.tableAliases);
         } else {
             throw new SQLException("No tables specified in SELECT statement");
         }
+        
+        // 如果使用了列别名，更新结果中的列名
+        if (stmt.columnAliases != null && !stmt.columnAliases.isEmpty()) {
+            return new QueryResult(displayColumnNames, result.getData());
+        }
+        
+        return result;
     }
 }
 

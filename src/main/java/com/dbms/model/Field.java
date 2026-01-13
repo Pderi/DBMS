@@ -84,7 +84,7 @@ public class Field implements Serializable {
             return length + 4; // 变长字段：4字节长度前缀 + 数据
         } else if (type == FieldType.INT) {
             return 4;
-        } else if (type == FieldType.FLOAT) {
+        } else if (type == FieldType.FLOAT || type == FieldType.DOUBLE) {
             return 8;
         } else if (type == FieldType.DATE) {
             return 8;
