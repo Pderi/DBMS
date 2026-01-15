@@ -31,9 +31,12 @@
 ### 主要特性
 
 - **自定义文件格式**：使用`.dbf`文件存储表结构，`.dat`文件存储数据记录
-- **SQL支持**：支持DDL（数据定义语言）和DML（数据操纵语言）
+- **SQL支持**：支持DDL（数据定义语言）、DML（数据操纵语言）、DCL（数据控制语言）和事务控制
 - **多表管理**：在一个数据库文件中管理多张表
 - **图形界面**：基于Swing的现代化用户界面
+- **用户权限管理**：支持用户创建、删除和权限分配
+- **数据备份恢复**：支持数据库备份和恢复功能
+- **事务支持**：支持事务的开启、提交和回滚
 
 ### 技术栈
 
@@ -347,14 +350,28 @@ while (pos < sql.length()) {
 语法分析器将Token序列转换为抽象语法树（AST）。
 
 **支持的SQL语句类型**：
-- `CREATE TABLE`: 创建表
-- `ALTER TABLE`: 修改表结构
-- `DROP TABLE`: 删除表
-- `RENAME TABLE`: 重命名表
-- `INSERT`: 插入数据
-- `UPDATE`: 更新数据
-- `DELETE`: 删除数据
-- `SELECT`: 查询数据
+- **DDL（数据定义语言）**：
+  - `CREATE TABLE`: 创建表
+  - `CREATE INDEX`: 创建索引
+  - `CREATE UNIQUE INDEX`: 创建唯一索引
+  - `ALTER TABLE`: 修改表结构
+  - `DROP TABLE`: 删除表
+  - `DROP USER`: 删除用户
+  - `RENAME TABLE`: 重命名表
+- **DML（数据操纵语言）**：
+  - `INSERT`: 插入数据
+  - `UPDATE`: 更新数据
+  - `DELETE`: 删除数据
+  - `SELECT`: 查询数据
+- **DCL（数据控制语言）**：
+  - `CREATE USER`: 创建用户
+  - `DROP USER`: 删除用户
+  - `GRANT`: 分配权限
+  - `REVOKE`: 回收权限
+- **事务控制**：
+  - `BEGIN TRANSACTION`: 开始事务
+  - `COMMIT`: 提交事务
+  - `ROLLBACK`: 回滚事务
 
 **解析方法**：
 - 递归下降解析器
@@ -401,6 +418,11 @@ private CreateTableStatement parseCreateTable() {
   - 验证表名和字段名合法性
   - 检查表是否已存在
   - 创建表结构并保存到文件
+  
+- `createIndex()`: 创建索引
+  - 验证索引名、表名和列名
+  - 检查索引是否已存在
+  - 创建索引并保存到表结构
   
 - `dropTable()`: 删除表
   - 从数据库中移除表
@@ -451,12 +473,19 @@ private CreateTableStatement parseCreateTable() {
   - 读取所有记录
   - WHERE条件过滤
   - 字段投影（选择指定列）
+  - ORDER BY排序（支持多列、ASC/DESC）
   - 返回查询结果
   
 - `join()`: 多表连接
   - 嵌套循环连接（Nested Loop Join）
   - 支持等值连接
   - 支持WHERE条件
+  - 支持ORDER BY排序
+
+- `executeSubquery()`: 执行嵌套查询
+  - 支持IN (SELECT ...)子查询
+  - 递归执行子查询
+  - 返回子查询结果集
 
 **查询结果**：
 - `QueryResult`类包含列名和数据
@@ -472,6 +501,73 @@ private CreateTableStatement parseCreateTable() {
 2. 根据语句类型选择执行器
 3. 执行操作
 4. 返回结果
+
+**新增功能**：
+- **用户管理**：通过`UserManager`管理用户账户和权限
+- **事务管理**：通过`TransactionManager`管理事务的开启、提交和回滚
+- **DCL执行**：支持GRANT和REVOKE语句执行
+- **用户创建/删除**：支持CREATE USER和DROP USER语句执行
+
+### UserManager（用户管理器）
+
+负责用户账户和权限的管理。
+
+**核心功能**：
+- `createUser()`: 创建新用户
+- `deleteUser()`: 删除用户
+- `login()`: 用户登录验证
+- `grantPermission()`: 分配权限
+- `revokePermission()`: 回收权限
+- `getAllUsers()`: 获取所有用户列表
+
+**权限管理**：
+- 支持权限：SELECT, INSERT, UPDATE, DELETE, CREATE_TABLE, ALL等
+- 权限存储在`users.dat`文件中
+- 默认创建admin用户，拥有ALL权限
+
+**实现原理**：
+- 使用`HashMap<String, User>`存储用户
+- 用户数据持久化到`users.dat`文件
+- 使用Java序列化保存用户对象
+
+### TransactionManager（事务管理器）
+
+负责事务的管理和控制。
+
+**核心功能**：
+- `beginTransaction()`: 开始事务
+- `commit()`: 提交事务
+- `rollback()`: 回滚事务
+- `getCurrentTransaction()`: 获取当前事务
+
+**实现原理**：
+- 使用`ThreadLocal`存储当前事务
+- 记录事务中的操作（INSERT、UPDATE、DELETE）
+- 回滚时撤销所有操作（简化实现）
+
+**注意事项**：
+- 当前为简化实现，主要用于演示
+- 完整的事务需要WAL日志和MVCC机制
+
+### BackupManager（备份管理器）
+
+负责数据库的备份和恢复。
+
+**核心功能**：
+- `backupDatabase()`: 备份数据库
+  - 备份所有.dbf文件
+  - 备份所有.dat文件
+  - 创建带时间戳的备份目录
+  
+- `restoreDatabase()`: 恢复数据库
+  - 从备份目录恢复.dbf文件
+  - 从备份目录恢复.dat文件
+  - 覆盖当前数据库文件
+
+**实现原理**：
+- 使用`Files.copy()`复制文件
+- 备份目录命名格式：`db_backup_yyyyMMdd_HHmmss`
+- 支持选择备份位置和恢复源
 
 ---
 
@@ -508,6 +604,16 @@ private CreateTableStatement parseCreateTable() {
 - `JTextArea`显示文本结果
 - `JTable`显示表格数据
 - 支持滚动查看
+
+**用户管理界面**：
+- 用户列表对话框
+- 显示所有用户及其权限
+- 支持刷新用户列表
+
+**备份恢复功能**：
+- 通过菜单栏"文件"->"备份数据库"进行备份
+- 通过菜单栏"文件"->"恢复数据库"进行恢复
+- 备份包含所有.dbf和.dat文件
 
 ### 事件处理
 
@@ -631,6 +737,53 @@ DROP TABLE table_name;
 RENAME TABLE old_name TO new_name;
 ```
 
+**CREATE INDEX**：
+```sql
+CREATE INDEX index_name ON table_name(column_name);
+CREATE UNIQUE INDEX index_name ON table_name(column_name);
+```
+
+#### DCL语句
+
+**CREATE USER**：
+```sql
+CREATE USER username IDENTIFIED BY 'password';
+```
+
+**DROP USER**：
+```sql
+DROP USER username;
+```
+
+**GRANT**：
+```sql
+GRANT permission1, permission2 TO username;
+GRANT ALL TO username;
+```
+
+**REVOKE**：
+```sql
+REVOKE permission FROM username;
+REVOKE permission1, permission2 FROM username;
+```
+
+#### 事务控制语句
+
+**BEGIN TRANSACTION**：
+```sql
+BEGIN TRANSACTION;
+```
+
+**COMMIT**：
+```sql
+COMMIT;
+```
+
+**ROLLBACK**：
+```sql
+ROLLBACK;
+```
+
 #### DML语句
 
 **INSERT**：
@@ -658,6 +811,8 @@ SELECT col1 AS alias_name FROM table_name;  -- 支持列别名
 SELECT * FROM table1 JOIN table2 ON table1.id = table2.id [WHERE condition];
 SELECT COUNT(*) FROM table_name [GROUP BY col1];  -- 支持聚合函数和分组
 SELECT col1, COUNT(*) as count FROM table_name GROUP BY col1;  -- 聚合函数与分组
+SELECT * FROM table_name ORDER BY col1 ASC, col2 DESC;  -- 支持排序
+SELECT * FROM table_name WHERE col1 IN (SELECT col2 FROM table2);  -- 支持嵌套查询
 ```
 
 ### WHERE条件支持
@@ -677,6 +832,11 @@ SELECT col1, COUNT(*) as count FROM table_name GROUP BY col1;  -- 聚合函数�
 - `NOT`: 逻辑非（预留）
 - 支持括号嵌套：`(condition1 AND condition2) OR condition3`
 
+**IN操作符**：
+- `IN (value1, value2, ...)`: 值列表匹配
+- `IN (SELECT ...)`: 嵌套查询匹配
+- `NOT IN (...)`: 反向匹配
+
 **示例**：
 ```sql
 SELECT * FROM students WHERE age > 20;
@@ -684,6 +844,26 @@ SELECT * FROM students WHERE name LIKE 'A%';  -- 匹配以A开头的名字
 SELECT * FROM students WHERE name LIKE '%li%';  -- 匹配包含'li'的名字
 SELECT * FROM students WHERE id = 1 AND age > 18;
 SELECT * FROM students WHERE (age > 20 AND gender = 'Female') OR id = 1;  -- 括号支持
+SELECT * FROM students WHERE id IN (1, 2, 3);  -- IN值列表
+SELECT * FROM students WHERE id IN (SELECT student_id FROM enrollments WHERE grade > 90);  -- IN嵌套查询
+```
+
+### ORDER BY排序支持
+
+**语法**：
+```sql
+SELECT * FROM table_name ORDER BY column1 [ASC|DESC], column2 [ASC|DESC];
+```
+
+**特性**：
+- 支持单列和多列排序
+- 支持升序（ASC）和降序（DESC），默认为ASC
+- 支持NULL值处理（NULL值排在最后）
+
+**示例**：
+```sql
+SELECT * FROM students ORDER BY age ASC;
+SELECT * FROM students ORDER BY age DESC, name ASC;  -- 先按年龄降序，再按姓名升序
 ```
 
 ---
@@ -744,15 +924,20 @@ SELECT * FROM students WHERE (age > 20 AND gender = 'Female') OR id = 1;  -- 括
 
 ### 功能扩展
 
-1. **索引支持**：
-   - B+树索引
-   - 哈希索引
-   - 主键自动索引
+1. **索引支持**：✅ **已实现**
+   - ✅ CREATE INDEX：创建普通索引
+   - ✅ CREATE UNIQUE INDEX：创建唯一索引
+   - ⏳ B+树索引（当前为简化实现）
+   - ⏳ 哈希索引
+   - ⏳ 主键自动索引
 
-2. **事务支持**：
-   - ACID特性
-   - 日志记录
-   - 回滚机制
+2. **事务支持**：✅ **已实现**
+   - ✅ BEGIN TRANSACTION：开始事务
+   - ✅ COMMIT：提交事务
+   - ✅ ROLLBACK：回滚事务
+   - ⏳ 完整ACID特性（当前为简化实现）
+   - ⏳ WAL日志记录
+   - ⏳ 完整回滚机制
 
 3. **约束支持**：
    - 外键约束
@@ -762,9 +947,11 @@ SELECT * FROM students WHERE (age > 20 AND gender = 'Female') OR id = 1;  -- 括
 4. **高级查询**：
    - ✅ 聚合函数（COUNT, SUM, AVG, MAX, MIN） - **已实现**
    - ✅ GROUP BY - **已实现**
-   - ORDER BY - 待实现
-   - 子查询 - 待实现
-   - HAVING - 待实现
+   - ✅ ORDER BY - **已实现**（支持多列排序、ASC/DESC）
+   - ✅ 嵌套查询（IN (SELECT ...)） - **已实现**
+   - ⏳ HAVING - 待实现
+   - ⏳ EXISTS子查询 - 待实现
+   - ⏳ 相关子查询 - 待实现
 
 ### 性能优化
 
@@ -2644,14 +2831,14 @@ ORDER BY o.order_date DESC;
 | **存储方式** | 自定义二进制文件 | SQLite数据库文件 | 服务器+文件系统 | 服务器+文件系统 |
 | **SQL支持** | 基础DDL/DML | 完整SQL | 完整SQL | 完整SQL |
 | **数据类型** | 5种基础类型 | 丰富的数据类型 | 丰富的数据类型 | 丰富的数据类型 |
-| **索引** | 不支持 | B树索引 | B+树索引 | B树/GiST索引 |
-| **事务** | 不支持 | ACID事务 | ACID事务 | ACID事务 |
+| **索引** | ✅ 基础支持 | B树索引 | B+树索引 | B树/GiST索引 |
+| **事务** | ✅ 基础支持 | ACID事务 | ACID事务 | ACID事务 |
 | **并发控制** | 不支持 | 文件锁 | 行级锁 | MVCC |
 | **外键约束** | 不支持 | 支持 | 支持 | 支持 |
 | **触发器** | 不支持 | 支持 | 支持 | 支持 |
 | **存储过程** | 不支持 | 不支持 | 支持 | 支持 |
 | **视图** | 不支持 | 支持 | 支持 | 支持 |
-| **用户权限** | 不支持 | 不支持 | 支持 | 支持 |
+| **用户权限** | ✅ 基础支持 | 不支持 | 支持 | 支持 |
 | **复制/集群** | 不支持 | 不支持 | 支持 | 支持 |
 | **文件大小** | 无限制 | 281TB | 取决于文件系统 | 取决于文件系统 |
 | **跨平台** | 是（Java） | 是 | 是 | 是 |
@@ -2683,16 +2870,26 @@ ORDER BY o.order_date DESC;
 ```sql
 -- DDL
 CREATE TABLE, ALTER TABLE, DROP TABLE, RENAME TABLE
+CREATE INDEX, CREATE UNIQUE INDEX
 
 -- DML
 INSERT, UPDATE, DELETE, SELECT
 
+-- DCL
+CREATE USER, DROP USER
+GRANT, REVOKE
+
+-- 事务控制
+BEGIN TRANSACTION, COMMIT, ROLLBACK
+
 -- 查询特性
-WHERE条件（=, !=, <, >, <=, >=, LIKE）
+WHERE条件（=, !=, <, >, <=, >=, LIKE, IN）
 WHERE条件支持AND/OR逻辑和括号嵌套
+IN (SELECT ...) 嵌套查询
 JOIN（等值连接，支持隐式和显式JOIN）
 聚合函数：COUNT, SUM, AVG, MAX, MIN
 GROUP BY分组
+ORDER BY排序（支持多列、ASC/DESC）
 列别名（AS关键字）
 UPDATE表达式（如 age = age + 1）
 表别名（在JOIN查询中）
@@ -2702,13 +2899,14 @@ UPDATE表达式（如 age = age + 1）
 ```sql
 -- 所有本系统支持的SQL，plus:
 -- 分组过滤：HAVING
--- 排序：ORDER BY
 -- 限制：LIMIT, OFFSET
--- 子查询：嵌套SELECT
+-- 更多子查询类型：EXISTS, ANY, ALL
 -- 联合：UNION, INTERSECT, EXCEPT
 -- 窗口函数（PostgreSQL）
 -- CTE（Common Table Expressions）
 -- 更多数据类型和约束
+-- 存储过程和触发器
+-- 视图（VIEW）
 ```
 
 #### 3. 性能对比
@@ -3030,10 +3228,21 @@ public class QueryCache {
 
 ---
 
-*文档版本：1.3*  
+*文档版本：1.4*  
 *最后更新：2024年*
 
 ## 更新日志
+
+### v1.4 (2024)
+- ✅ 新增CREATE INDEX和CREATE UNIQUE INDEX支持
+- ✅ 新增CREATE USER和DROP USER支持（DCL）
+- ✅ 新增GRANT和REVOKE权限管理支持
+- ✅ 新增BEGIN TRANSACTION、COMMIT、ROLLBACK事务支持
+- ✅ 新增ORDER BY排序支持（多列、ASC/DESC）
+- ✅ 新增IN (SELECT ...)嵌套查询支持
+- ✅ 新增用户管理界面（查看用户列表和权限）
+- ✅ 新增数据备份和恢复功能
+- ✅ 改进WHERE条件处理（支持IN操作符和嵌套查询）
 
 ### v1.3 (2024)
 - ✅ 新增DOUBLE数据类型支持
