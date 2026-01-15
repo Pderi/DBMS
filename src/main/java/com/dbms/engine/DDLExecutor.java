@@ -244,5 +244,88 @@ public class DDLExecutor {
     public java.util.List<String> getTableNames() {
         return database.getTableNames();
     }
+    
+    /**
+     * 创建索引
+     */
+    public void createIndex(String indexName, String tableName, String columnName, boolean unique) {
+        Table table = database.getTable(tableName);
+        if (table == null) {
+            throw new DBMSException("Table " + tableName + " does not exist");
+        }
+        
+        // 检查字段是否存在
+        if (table.getFieldByName(columnName) == null) {
+            throw new DBMSException("Column " + columnName + " does not exist in table " + tableName);
+        }
+        
+        // 检查索引是否已存在
+        if (table.getIndex(indexName) != null) {
+            throw new DBMSException("Index " + indexName + " already exists");
+        }
+        
+        // 创建索引对象
+        com.dbms.model.Index index = new com.dbms.model.Index(indexName, tableName, columnName, unique);
+        
+        // 构建索引：读取所有记录，建立索引映射
+        try {
+            String tableDataFile = com.dbms.storage.DATFileManager.getTableDataFilePath(datFilePath, tableName);
+            java.io.File dataFile = new java.io.File(tableDataFile);
+            if (dataFile.exists() && dataFile.length() > 0) {
+                java.util.List<com.dbms.model.Record> records = 
+                    com.dbms.storage.DATFileManager.readAllRecords(tableDataFile, table);
+                java.util.List<Long> positions = getRecordPositions(tableDataFile, table);
+                
+                // 确保positions和records大小一致
+                int minSize = Math.min(records.size(), positions.size());
+                for (int i = 0; i < minSize; i++) {
+                    com.dbms.model.Record record = records.get(i);
+                    Object value = record.getValue(table, columnName);
+                    if (value != null) {
+                        index.addIndexEntry(value, positions.get(i));
+                    }
+                }
+            }
+        } catch (java.io.IOException e) {
+            throw new DBMSException("Failed to build index: " + e.getMessage(), e);
+        }
+        
+        // 添加索引到表
+        table.addIndex(index);
+        
+        // 保存到文件
+        try {
+            DBFFileManager.updateTableInFile(dbFilePath, table);
+        } catch (java.io.IOException e) {
+            throw new DBMSException("Failed to create index: " + e.getMessage(), e);
+        }
+    }
+    
+    /**
+     * 获取记录位置列表（用于构建索引）
+     */
+    private java.util.List<Long> getRecordPositions(String filePath, Table table) throws java.io.IOException {
+        java.util.List<Long> positions = new java.util.ArrayList<>();
+        java.io.File file = new java.io.File(filePath);
+        if (!file.exists() || file.length() == 0) {
+            return positions;
+        }
+        
+        try (java.io.RandomAccessFile raf = new java.io.RandomAccessFile(filePath, "r")) {
+            long fileLength = raf.length();
+            while (raf.getFilePointer() < fileLength) {
+                try {
+                    long position = raf.getFilePointer();
+                    com.dbms.model.Record record = com.dbms.storage.DATFileManager.readRecord(raf, table);
+                    if (!record.isDeleted()) {
+                        positions.add(position);
+                    }
+                } catch (java.io.EOFException e) {
+                    break;
+                }
+            }
+        }
+        return positions;
+    }
 }
 

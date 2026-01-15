@@ -1,9 +1,12 @@
 package com.dbms.engine;
 
 import com.dbms.model.Field;
+import com.dbms.model.User;
 import com.dbms.parser.SQLParser;
 import com.dbms.parser.SQLParser.*;
 import com.dbms.util.SQLException;
+import com.dbms.util.TransactionManager;
+import com.dbms.util.UserManager;
 import com.dbms.engine.QueryExecutor.QueryResult;
 
 /**
@@ -15,12 +18,24 @@ public class SQLExecutor {
     private DMLExecutor dmlExecutor;
     private QueryExecutor queryExecutor;
     private SQLParser parser;
+    private UserManager userManager;
+    private TransactionManager transactionManager;
     
     public SQLExecutor(DDLExecutor ddlExecutor, DMLExecutor dmlExecutor, QueryExecutor queryExecutor) {
         this.ddlExecutor = ddlExecutor;
         this.dmlExecutor = dmlExecutor;
         this.queryExecutor = queryExecutor;
         this.parser = new SQLParser();
+        this.userManager = new UserManager();
+        this.transactionManager = new TransactionManager();
+    }
+    
+    public UserManager getUserManager() {
+        return userManager;
+    }
+    
+    public TransactionManager getTransactionManager() {
+        return transactionManager;
     }
     
     /**
@@ -33,10 +48,16 @@ public class SQLExecutor {
             switch (stmt.type) {
                 case CREATE_TABLE:
                     return executeCreateTable((CreateTableStatement) stmt);
+                case CREATE_INDEX:
+                    return executeCreateIndex((CreateIndexStatement) stmt);
+                case CREATE_USER:
+                    return executeCreateUser((CreateUserStatement) stmt);
                 case ALTER_TABLE:
                     return executeAlterTable((AlterTableStatement) stmt);
                 case DROP_TABLE:
                     return executeDropTable((DropTableStatement) stmt);
+                case DROP_USER:
+                    return executeDropUser((DropUserStatement) stmt);
                 case RENAME_TABLE:
                     return executeRenameTable((RenameTableStatement) stmt);
                 case INSERT:
@@ -47,6 +68,16 @@ public class SQLExecutor {
                     return executeDelete((DeleteStatement) stmt);
                 case SELECT:
                     return executeSelect((SelectStatement) stmt);
+                case GRANT:
+                    return executeGrant((GrantStatement) stmt);
+                case REVOKE:
+                    return executeRevoke((RevokeStatement) stmt);
+                case BEGIN:
+                    return executeBegin((BeginStatement) stmt);
+                case COMMIT:
+                    return executeCommit((CommitStatement) stmt);
+                case ROLLBACK:
+                    return executeRollback((RollbackStatement) stmt);
                 default:
                     throw new SQLException("Unsupported statement type: " + stmt.type);
             }
@@ -62,6 +93,16 @@ public class SQLExecutor {
         }
         ddlExecutor.createTable(stmt.tableName, fields);
         return "Table '" + stmt.tableName + "' created successfully";
+    }
+    
+    private String executeCreateIndex(CreateIndexStatement stmt) {
+        ddlExecutor.createIndex(stmt.indexName, stmt.tableName, stmt.columnName, stmt.unique);
+        return "Index '" + stmt.indexName + "' created successfully on " + stmt.tableName + "(" + stmt.columnName + ")";
+    }
+    
+    private String executeCreateUser(CreateUserStatement stmt) {
+        userManager.createUser(stmt.username, stmt.password);
+        return "User '" + stmt.username + "' created successfully";
     }
     
     private String executeAlterTable(AlterTableStatement stmt) {
@@ -87,6 +128,11 @@ public class SQLExecutor {
     private String executeDropTable(DropTableStatement stmt) {
         ddlExecutor.dropTable(stmt.tableName);
         return "Table '" + stmt.tableName + "' dropped successfully";
+    }
+    
+    private String executeDropUser(DropUserStatement stmt) {
+        userManager.deleteUser(stmt.username);
+        return "User '" + stmt.username + "' dropped successfully";
     }
     
     private String executeRenameTable(RenameTableStatement stmt) {
@@ -149,11 +195,11 @@ public class SQLExecutor {
         if (stmt.tableNames.size() == 1) {
             // 单表查询
             result = queryExecutor.select(stmt.tableNames.get(0), processedColumnNames, 
-                                         stmt.whereCondition, stmt.groupByColumns);
+                                         stmt.whereCondition, stmt.groupByColumns, stmt.orderByColumns);
         } else if (stmt.tableNames.size() >= 2) {
             // 多表连接（支持2个或更多表）
             result = queryExecutor.join(stmt.tableNames, processedColumnNames, 
-                stmt.joinConditions, stmt.whereCondition, stmt.groupByColumns, stmt.tableAliases);
+                stmt.joinConditions, stmt.whereCondition, stmt.groupByColumns, stmt.tableAliases, stmt.orderByColumns);
         } else {
             throw new SQLException("No tables specified in SELECT statement");
         }
@@ -164,6 +210,57 @@ public class SQLExecutor {
         }
         
         return result;
+    }
+    
+    private String executeGrant(GrantStatement stmt) {
+        // 检查当前用户是否有GRANT权限
+        // 如果没有当前用户（未登录），允许执行（简化权限管理，适用于教学系统）
+        User currentUser = userManager.getCurrentUser();
+        if (currentUser != null && !userManager.hasPermission("GRANT") && !userManager.hasPermission("ALL")) {
+            throw new SQLException("Permission denied: GRANT privilege required");
+        }
+        
+        for (String permission : stmt.permissions) {
+            userManager.grantPermission(stmt.username, permission);
+        }
+        return "Permissions granted to " + stmt.username + " successfully";
+    }
+    
+    private String executeRevoke(RevokeStatement stmt) {
+        // 检查当前用户是否有REVOKE权限
+        // 如果没有当前用户（未登录），允许执行（简化权限管理，适用于教学系统）
+        User currentUser = userManager.getCurrentUser();
+        if (currentUser != null && !userManager.hasPermission("REVOKE") && !userManager.hasPermission("ALL")) {
+            throw new SQLException("Permission denied: REVOKE privilege required");
+        }
+        
+        for (String permission : stmt.permissions) {
+            userManager.revokePermission(stmt.username, permission);
+        }
+        return "Permissions revoked from " + stmt.username + " successfully";
+    }
+    
+    private String executeBegin(BeginStatement stmt) {
+        transactionManager.beginTransaction();
+        return "Transaction started";
+    }
+    
+    private String executeCommit(CommitStatement stmt) {
+        try {
+            transactionManager.commit(transactionManager.getCurrentTransaction());
+            return "Transaction committed successfully";
+        } catch (Exception e) {
+            throw new SQLException("Failed to commit transaction: " + e.getMessage(), e);
+        }
+    }
+    
+    private String executeRollback(RollbackStatement stmt) {
+        try {
+            transactionManager.rollback(transactionManager.getCurrentTransaction());
+            return "Transaction rolled back successfully";
+        } catch (Exception e) {
+            throw new SQLException("Failed to rollback transaction: " + e.getMessage(), e);
+        }
     }
 }
 

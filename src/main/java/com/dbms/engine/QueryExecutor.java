@@ -37,7 +37,16 @@ public class QueryExecutor {
      */
     public QueryResult select(String tableName, List<String> columnNames, 
                              SQLParser.WhereCondition whereCondition,
-                             List<String> groupByColumns) {
+                             List<String> groupByColumns,
+                             List<SQLParser.OrderByItem> orderByColumns) {
+        System.out.println("QueryExecutor.select() - orderByColumns: " + 
+            (orderByColumns == null ? "null" : (orderByColumns.isEmpty() ? "empty" : orderByColumns.size() + " items")));
+        if (orderByColumns != null && !orderByColumns.isEmpty()) {
+            for (SQLParser.OrderByItem item : orderByColumns) {
+                System.out.println("  ORDER BY: " + item.columnName + " " + (item.ascending ? "ASC" : "DESC"));
+            }
+        }
+        
         Table table = ddlExecutor.getTable(tableName);
         if (table == null) {
             throw new DBMSException("Table " + tableName + " does not exist");
@@ -112,7 +121,12 @@ public class QueryExecutor {
             
             // 如果有聚合函数或GROUP BY，执行聚合查询
             if (hasAggregate || (groupByColumns != null && !groupByColumns.isEmpty())) {
-                return executeAggregateQuery(table, filteredRecords, selectedColumns, groupByColumns);
+                QueryResult result = executeAggregateQuery(table, filteredRecords, selectedColumns, groupByColumns);
+                // 对聚合结果排序
+                if (orderByColumns != null && !orderByColumns.isEmpty()) {
+                    sortResultData(result.getData(), result.getColumnNames(), orderByColumns, table);
+                }
+                return result;
             }
             
             // 投影（选择指定字段）
@@ -131,6 +145,16 @@ public class QueryExecutor {
                 resultData.add(row);
             }
             
+            // 排序
+            System.out.println("准备排序 - orderByColumns: " + 
+                (orderByColumns == null ? "null" : (orderByColumns.isEmpty() ? "empty" : orderByColumns.size() + " items")));
+            if (orderByColumns != null && !orderByColumns.isEmpty()) {
+                System.out.println("调用sortResultData...");
+                sortResultData(resultData, selectedColumns, orderByColumns, table);
+            } else {
+                System.out.println("跳过排序 - orderByColumns为null或空");
+            }
+            
             return new QueryResult(selectedColumns, resultData);
             
         } catch (IOException e) {
@@ -145,7 +169,8 @@ public class QueryExecutor {
                            List<JoinCondition> joinConditions,
                            SQLParser.WhereCondition whereCondition,
                            List<String> groupByColumns,
-                           java.util.Map<String, String> tableAliases) {
+                           java.util.Map<String, String> tableAliases,
+                           List<SQLParser.OrderByItem> orderByColumns) {
         if (tableNames.size() < 2) {
             throw new DBMSException("Join requires at least 2 tables");
         }
@@ -195,7 +220,12 @@ public class QueryExecutor {
         
         // 如果有聚合函数或GROUP BY，执行聚合查询
         if (hasAggregate || (groupByColumns != null && !groupByColumns.isEmpty())) {
-            return executeAggregateQueryForJoin(tables, fullResultData, columnNames, groupByColumns, tableAliases);
+            QueryResult result = executeAggregateQueryForJoin(tables, fullResultData, columnNames, groupByColumns, tableAliases);
+            // 对聚合结果排序
+            if (orderByColumns != null && !orderByColumns.isEmpty()) {
+                sortResultDataForJoin(result.getData(), result.getColumnNames(), orderByColumns, tables, tableAliases);
+            }
+            return result;
         }
         
         // 处理列名（支持 alias.column 格式）
@@ -221,6 +251,11 @@ public class QueryExecutor {
                 projectedRow.add(value);
             }
             projectedData.add(projectedRow);
+        }
+        
+        // 排序
+        if (orderByColumns != null && !orderByColumns.isEmpty()) {
+            sortResultDataForJoin(projectedData, selectedColumns, orderByColumns, tables, tableAliases);
         }
         
         return new QueryResult(selectedColumns, projectedData);
@@ -618,6 +653,26 @@ public class QueryExecutor {
             rowValue = row.get(resultIndex);
         }
         
+        // 处理IN子查询
+        if (condition.operator.equals("IN") && condition.subquery != null) {
+            // 执行子查询
+            QueryResult subqueryResult = executeSubquery(condition.subquery);
+            // 检查rowValue是否在子查询结果中
+            if (rowValue == null) {
+                return false;  // NULL值不在任何集合中
+            }
+            // 检查子查询结果的第一列（通常IN子查询只返回一列）
+            for (List<Object> subRow : subqueryResult.getData()) {
+                if (!subRow.isEmpty()) {
+                    Object subValue = subRow.get(0);
+                    if (compareValues(rowValue, subValue) == 0) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+        
         // 处理条件值可能是另一个表的列的情况（table.column格式）
         Object actualConditionValue = conditionValue;
         if (conditionValue instanceof String) {
@@ -663,6 +718,23 @@ public class QueryExecutor {
                 return false;
             default:
                 return false;
+        }
+    }
+    
+    /**
+     * 执行子查询
+     */
+    private QueryResult executeSubquery(SQLParser.SelectStatement subquery) {
+        // 使用QueryExecutor的方法执行子查询
+        if (subquery.tableNames.size() == 1) {
+            return select(subquery.tableNames.get(0), subquery.columnNames, 
+                         subquery.whereCondition, subquery.groupByColumns, subquery.orderByColumns);
+        } else if (subquery.tableNames.size() >= 2) {
+            return join(subquery.tableNames, subquery.columnNames, 
+                       subquery.joinConditions, subquery.whereCondition, 
+                       subquery.groupByColumns, subquery.tableAliases, subquery.orderByColumns);
+        } else {
+            throw new DBMSException("Subquery must specify at least one table");
         }
     }
     
@@ -973,6 +1045,144 @@ public class QueryExecutor {
             this.rightTable = rightTable;
             this.rightColumn = rightColumn;
         }
+    }
+    
+    /**
+     * 对单表查询结果进行排序
+     */
+    private void sortResultData(List<List<Object>> resultData, List<String> columnNames,
+                                List<SQLParser.OrderByItem> orderByColumns, Table table) {
+        if (resultData.isEmpty() || orderByColumns == null || orderByColumns.isEmpty()) {
+            return; // 无需排序
+        }
+        
+        System.out.println("开始排序 - 数据行数: " + resultData.size() + ", 排序列数: " + orderByColumns.size());
+        System.out.println("投影列名: " + columnNames);
+        
+        // 预先计算所有排序列的索引，避免在排序循环中重复查找
+        List<Integer> sortColumnIndices = new ArrayList<>();
+        for (SQLParser.OrderByItem orderBy : orderByColumns) {
+            String colName = orderBy.columnName;
+            // 支持 table.column 格式
+            String actualColName = colName;
+            if (colName.contains(".")) {
+                String[] parts = colName.split("\\.", 2);
+                actualColName = parts[1];
+            }
+            
+            // 找到列在投影结果中的索引（基于columnNames，大小写不敏感）
+            int colIndex = -1;
+            for (int i = 0; i < columnNames.size(); i++) {
+                String col = columnNames.get(i);
+                String colToCompare = col;
+                if (col.contains(".")) {
+                    String[] parts = col.split("\\.", 2);
+                    colToCompare = parts[1];
+                }
+                // 大小写不敏感比较
+                if (colToCompare.equalsIgnoreCase(actualColName)) {
+                    colIndex = i;
+                    break;
+                }
+            }
+            
+            // 如果找不到，尝试直接使用字段在表中的位置（适用于SELECT *的情况）
+            if (colIndex < 0) {
+                Field field = table.getFieldByName(actualColName);
+                if (field != null) {
+                    int fieldIndex = table.getFields().indexOf(field);
+                    // 如果SELECT *，列顺序与表字段顺序一致
+                    if (columnNames.size() == table.getFieldCount()) {
+                        colIndex = fieldIndex;
+                    } else {
+                        // 如果不是SELECT *，需要找到该字段在投影列中的位置
+                        for (int i = 0; i < columnNames.size(); i++) {
+                            String col = columnNames.get(i);
+                            String colToCompare = col;
+                            if (col.contains(".")) {
+                                String[] parts = col.split("\\.", 2);
+                                colToCompare = parts[1];
+                            }
+                            Field colField = table.getFieldByName(colToCompare);
+                            if (colField != null && table.getFields().indexOf(colField) == fieldIndex) {
+                                colIndex = i;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            
+            if (colIndex < 0) {
+                System.err.println("错误: 找不到排序列 '" + actualColName + "'. 可用列: " + columnNames);
+                throw new DBMSException("Cannot find column '" + actualColName + "' for ORDER BY");
+            }
+            
+            sortColumnIndices.add(colIndex);
+            System.out.println("  排序列: " + orderBy.columnName + " -> 索引 " + colIndex + ", 升序: " + orderBy.ascending);
+        }
+        
+        // 执行排序
+        final List<Integer> finalSortIndices = sortColumnIndices;
+        resultData.sort((row1, row2) -> {
+            for (int idx = 0; idx < orderByColumns.size(); idx++) {
+                SQLParser.OrderByItem orderBy = orderByColumns.get(idx);
+                int colIndex = finalSortIndices.get(idx);
+                
+                if (colIndex >= row1.size() || colIndex >= row2.size()) {
+                    continue; // 跳过无效的列索引
+                }
+                
+                Object value1 = row1.get(colIndex);
+                Object value2 = row2.get(colIndex);
+                
+                // 处理NULL值：NULL值排在最后（DESC时排在最前）
+                if (value1 == null && value2 == null) {
+                    continue; // 两个都是NULL，继续下一个排序列
+                }
+                if (value1 == null) {
+                    return orderBy.ascending ? 1 : -1; // NULL值排在最后（ASC）或最前（DESC）
+                }
+                if (value2 == null) {
+                    return orderBy.ascending ? -1 : 1;
+                }
+                
+                int comparison = compareValues(value1, value2);
+                if (comparison != 0) {
+                    return orderBy.ascending ? comparison : -comparison;
+                }
+            }
+            return 0; // 所有排序列都相等
+        });
+        
+        System.out.println("排序完成 - 数据行数: " + resultData.size());
+        // 打印前几行验证排序
+        for (int i = 0; i < Math.min(3, resultData.size()); i++) {
+            System.out.println("排序后第" + (i+1) + "行: " + resultData.get(i));
+        }
+    }
+    
+    /**
+     * 对多表连接查询结果进行排序
+     */
+    private void sortResultDataForJoin(List<List<Object>> resultData, List<String> columnNames,
+                                      List<SQLParser.OrderByItem> orderByColumns,
+                                      List<Table> tables, java.util.Map<String, String> tableAliases) {
+        resultData.sort((row1, row2) -> {
+            for (SQLParser.OrderByItem orderBy : orderByColumns) {
+                String colName = orderBy.columnName;
+                
+                // 从结果行中提取排序列的值
+                Object value1 = getColumnValueFromJoinedRow(tables, row1, colName, tableAliases);
+                Object value2 = getColumnValueFromJoinedRow(tables, row2, colName, tableAliases);
+                
+                int comparison = compareValues(value1, value2);
+                if (comparison != 0) {
+                    return orderBy.ascending ? comparison : -comparison;
+                }
+            }
+            return 0; // 所有排序列都相等
+        });
     }
     
     /**

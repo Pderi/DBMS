@@ -528,13 +528,22 @@ public class DMLExecutor {
      */
     public static class QueryCondition {
         public String columnName;
-        public String operator; // =, <, >, <=, >=, !=, LIKE
+        public String operator; // =, <, >, <=, >=, !=, LIKE, IN
         public Object value;
+        public com.dbms.parser.SQLParser.SelectStatement subquery;  // 子查询（用于IN子句）
         
         public QueryCondition(String columnName, String operator, Object value) {
             this.columnName = columnName;
             this.operator = operator;
             this.value = value;
+            this.subquery = null;
+        }
+        
+        public QueryCondition(String columnName, String operator, com.dbms.parser.SQLParser.SelectStatement subquery) {
+            this.columnName = columnName;
+            this.operator = operator;
+            this.value = null;
+            this.subquery = subquery;
         }
         
         public String getColumnName() {

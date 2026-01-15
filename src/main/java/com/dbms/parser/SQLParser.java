@@ -21,7 +21,9 @@ public class SQLParser {
     
     // SQL语句类型
     public enum StatementType {
-        CREATE_TABLE, ALTER_TABLE, DROP_TABLE, RENAME_TABLE,
+        CREATE_TABLE, CREATE_INDEX, ALTER_TABLE, DROP_TABLE, RENAME_TABLE,
+        CREATE_USER, DROP_USER, GRANT, REVOKE,
+        BEGIN, COMMIT, ROLLBACK,
         INSERT, UPDATE, DELETE, SELECT, UNKNOWN
     }
     
@@ -157,6 +159,17 @@ public class SQLParser {
         }
     }
     
+    // ORDER BY项（列名和排序方向）
+    public static class OrderByItem {
+        public String columnName;
+        public boolean ascending;  // true为ASC，false为DESC
+        
+        public OrderByItem(String columnName, boolean ascending) {
+            this.columnName = columnName;
+            this.ascending = ascending;
+        }
+    }
+    
     // SELECT语句
     public static class SelectStatement extends SQLStatement {
         public List<String> columnNames;
@@ -166,6 +179,7 @@ public class SQLParser {
         public List<QueryExecutor.JoinCondition> joinConditions;
         public WhereCondition whereCondition;  // 改为支持多个条件
         public List<String> groupByColumns;  // GROUP BY 列
+        public List<OrderByItem> orderByColumns;  // ORDER BY 列
         
         public SelectStatement() {
             this.type = StatementType.SELECT;
@@ -174,6 +188,7 @@ public class SQLParser {
             this.tableNames = new ArrayList<>();
             this.tableAliases = new java.util.HashMap<>();
             this.groupByColumns = new ArrayList<>();
+            this.orderByColumns = new ArrayList<>();
         }
     }
     
@@ -212,11 +227,35 @@ public class SQLParser {
         
         switch (keyword) {
             case "CREATE":
-                return parseCreateTable();
+                // 检查下一个关键字是TABLE、INDEX、USER还是UNIQUE INDEX
+                if (peekKeyword("TABLE")) {
+                    return parseCreateTable();
+                } else if (peekKeyword("UNIQUE")) {
+                    // CREATE UNIQUE INDEX
+                    consume(); // 消费 UNIQUE
+                    if (peekKeyword("INDEX")) {
+                        return parseCreateIndex(true);
+                    } else {
+                        throw new SQLException("CREATE UNIQUE must be followed by INDEX");
+                    }
+                } else if (peekKeyword("INDEX")) {
+                    return parseCreateIndex(false);
+                } else if (peekKeyword("USER")) {
+                    return parseCreateUser();
+                } else {
+                    throw new SQLException("CREATE must be followed by TABLE, INDEX or USER");
+                }
             case "ALTER":
                 return parseAlterTable();
             case "DROP":
-                return parseDropTable();
+                // 检查下一个关键字是TABLE还是USER
+                if (peekKeyword("TABLE")) {
+                    return parseDropTable();
+                } else if (peekKeyword("USER")) {
+                    return parseDropUser();
+                } else {
+                    throw new SQLException("DROP must be followed by TABLE or USER");
+                }
             case "RENAME":
                 return parseRenameTable();
             case "INSERT":
@@ -227,6 +266,16 @@ public class SQLParser {
                 return parseDelete();
             case "SELECT":
                 return parseSelect();
+            case "GRANT":
+                return parseGrant();
+            case "REVOKE":
+                return parseRevoke();
+            case "BEGIN":
+                return parseBegin();
+            case "COMMIT":
+                return parseCommit();
+            case "ROLLBACK":
+                return parseRollback();
             default:
                 throw new SQLException("Unknown SQL keyword: " + keyword);
         }
@@ -422,6 +471,72 @@ public class SQLParser {
     }
     
     /**
+     * 解析CREATE INDEX语句
+     */
+    private CreateIndexStatement parseCreateIndex(boolean unique) {
+        CreateIndexStatement stmt = new CreateIndexStatement();
+        stmt.unique = unique;
+        expectKeyword("INDEX");
+        stmt.indexName = expectIdentifier();
+        expectKeyword("ON");
+        stmt.tableName = expectIdentifier();
+        expectPunctuation("(");
+        stmt.columnName = expectIdentifier();
+        expectPunctuation(")");
+        
+        return stmt;
+    }
+    
+    // CREATE INDEX语句
+    public static class CreateIndexStatement extends SQLStatement {
+        public String indexName;
+        public String tableName;
+        public String columnName;
+        public boolean unique;
+        
+        public CreateIndexStatement() {
+            this.type = StatementType.CREATE_INDEX;
+            this.unique = false;
+        }
+    }
+    
+    /**
+     * 解析CREATE USER语句
+     */
+    private CreateUserStatement parseCreateUser() {
+        expectKeyword("USER");
+        CreateUserStatement stmt = new CreateUserStatement();
+        stmt.username = expectIdentifier();
+        
+        // 解析 IDENTIFIED BY 'password'（可选）
+        if (peekKeyword("IDENTIFIED")) {
+            consume();
+            expectKeyword("BY");
+            // 密码可以是字符串或标识符
+            if (peekToken(TokenType.STRING)) {
+                stmt.password = expectToken(TokenType.STRING).value;
+            } else {
+                stmt.password = expectIdentifier();
+            }
+        } else {
+            // 如果没有指定密码，使用默认密码
+            stmt.password = "password";
+        }
+        
+        return stmt;
+    }
+    
+    // CREATE USER语句
+    public static class CreateUserStatement extends SQLStatement {
+        public String username;
+        public String password;
+        
+        public CreateUserStatement() {
+            this.type = StatementType.CREATE_USER;
+        }
+    }
+    
+    /**
      * 解析DROP TABLE语句
      */
     private DropTableStatement parseDropTable() {
@@ -429,6 +544,164 @@ public class SQLParser {
         DropTableStatement stmt = new DropTableStatement();
         stmt.tableName = expectIdentifier();
         return stmt;
+    }
+    
+    /**
+     * 解析DROP USER语句
+     */
+    private DropUserStatement parseDropUser() {
+        expectKeyword("USER");
+        DropUserStatement stmt = new DropUserStatement();
+        stmt.username = expectIdentifier();
+        return stmt;
+    }
+    
+    // DROP USER语句
+    public static class DropUserStatement extends SQLStatement {
+        public String username;
+        
+        public DropUserStatement() {
+            this.type = StatementType.DROP_USER;
+        }
+    }
+    
+    /**
+     * 解析GRANT语句
+     */
+    private GrantStatement parseGrant() {
+        GrantStatement stmt = new GrantStatement();
+        
+        // 解析权限列表（权限可以是关键字，如 SELECT, INSERT, UPDATE, DELETE）
+        while (true) {
+            String permission;
+            if (peekToken(TokenType.KEYWORD)) {
+                // 权限是关键字
+                permission = consume().value.toUpperCase();
+            } else {
+                // 权限是标识符
+                permission = expectIdentifier().toUpperCase();
+            }
+            stmt.permissions.add(permission);
+            if (peekPunctuation(",")) {
+                consume();
+            } else {
+                break;
+            }
+        }
+        
+        expectKeyword("TO");
+        stmt.username = expectIdentifier();
+        
+        return stmt;
+    }
+    
+    /**
+     * 解析REVOKE语句
+     */
+    private RevokeStatement parseRevoke() {
+        RevokeStatement stmt = new RevokeStatement();
+        
+        // 解析权限列表（权限可以是关键字，如 SELECT, INSERT, UPDATE, DELETE）
+        while (true) {
+            String permission;
+            if (peekToken(TokenType.KEYWORD)) {
+                // 权限是关键字
+                permission = consume().value.toUpperCase();
+            } else {
+                // 权限是标识符
+                permission = expectIdentifier().toUpperCase();
+            }
+            stmt.permissions.add(permission);
+            if (peekPunctuation(",")) {
+                consume();
+            } else {
+                break;
+            }
+        }
+        
+        expectKeyword("FROM");
+        stmt.username = expectIdentifier();
+        
+        return stmt;
+    }
+    
+    // GRANT语句
+    public static class GrantStatement extends SQLStatement {
+        public List<String> permissions;
+        public String username;
+        
+        public GrantStatement() {
+            this.type = StatementType.GRANT;
+            this.permissions = new ArrayList<>();
+        }
+    }
+    
+    // REVOKE语句
+    public static class RevokeStatement extends SQLStatement {
+        public List<String> permissions;
+        public String username;
+        
+        public RevokeStatement() {
+            this.type = StatementType.REVOKE;
+            this.permissions = new ArrayList<>();
+        }
+    }
+    
+    /**
+     * 解析BEGIN语句
+     */
+    private BeginStatement parseBegin() {
+        BeginStatement stmt = new BeginStatement();
+        // BEGIN TRANSACTION 或 BEGIN（简化处理，只支持BEGIN）
+        if (peekKeyword("TRANSACTION")) {
+            consume();
+        }
+        return stmt;
+    }
+    
+    /**
+     * 解析COMMIT语句
+     */
+    private CommitStatement parseCommit() {
+        CommitStatement stmt = new CommitStatement();
+        // COMMIT TRANSACTION 或 COMMIT（简化处理）
+        if (peekKeyword("TRANSACTION")) {
+            consume();
+        }
+        return stmt;
+    }
+    
+    /**
+     * 解析ROLLBACK语句
+     */
+    private RollbackStatement parseRollback() {
+        RollbackStatement stmt = new RollbackStatement();
+        // ROLLBACK TRANSACTION 或 ROLLBACK（简化处理）
+        if (peekKeyword("TRANSACTION")) {
+            consume();
+        }
+        return stmt;
+    }
+    
+    // BEGIN语句
+    public static class BeginStatement extends SQLStatement {
+        public BeginStatement() {
+            this.type = StatementType.BEGIN;
+        }
+    }
+    
+    // COMMIT语句
+    public static class CommitStatement extends SQLStatement {
+        public CommitStatement() {
+            this.type = StatementType.COMMIT;
+        }
+    }
+    
+    // ROLLBACK语句
+    public static class RollbackStatement extends SQLStatement {
+        public RollbackStatement() {
+            this.type = StatementType.ROLLBACK;
+        }
     }
     
     /**
@@ -749,6 +1022,50 @@ public class SQLParser {
             }
         }
         
+        // 解析ORDER BY子句
+        if (peekKeyword("ORDER")) {
+            System.out.println("找到ORDER关键字，开始解析ORDER BY");
+            consume();
+            expectKeyword("BY");
+            while (true) {
+                // 支持 alias.column 格式
+                String colName;
+                if (peekToken(TokenType.IDENTIFIER) && peekToken(1, TokenType.PUNCTUATION, ".")) {
+                    String alias = expectIdentifier();
+                    expectPunctuation(".");
+                    String column = expectIdentifier();
+                    colName = alias + "." + column;
+                } else {
+                    colName = expectIdentifier();
+                }
+                
+                System.out.println("解析到排序列: " + colName);
+                
+                // 解析排序方向（ASC或DESC，默认为ASC）
+                boolean ascending = true;
+                if (peekKeyword("ASC")) {
+                    consume();
+                    ascending = true;
+                } else if (peekKeyword("DESC")) {
+                    consume();
+                    ascending = false;
+                }
+                
+                stmt.orderByColumns.add(new OrderByItem(colName, ascending));
+                System.out.println("添加ORDER BY项: " + colName + " " + (ascending ? "ASC" : "DESC") + 
+                    ", 当前orderByColumns大小: " + stmt.orderByColumns.size());
+                
+                if (peekPunctuation(",")) {
+                    consume();
+                } else {
+                    break;
+                }
+            }
+            System.out.println("ORDER BY解析完成，共 " + stmt.orderByColumns.size() + " 个排序列");
+        } else {
+            System.out.println("未找到ORDER关键字");
+        }
+        
         return stmt;
     }
     
@@ -803,18 +1120,36 @@ public class SQLParser {
             columnName = expectIdentifier();
         }
         
-        // 解析操作符（支持 LIKE 关键字）
+        // 解析操作符（支持 LIKE 和 IN 关键字）
         String operator;
         if (peekKeyword("LIKE")) {
             consume();  // 消费 LIKE 关键字
             operator = "LIKE";
+        } else if (peekKeyword("IN")) {
+            consume();  // 消费 IN 关键字
+            operator = "IN";
         } else {
             operator = expectOperator();
         }
         
         // 对于等号操作符，检查右侧是否是列名（table.column格式）而不是值
-        Object value;
-        if (operator.equals("=") && peekToken(TokenType.IDENTIFIER) && 
+        Object value = null;
+        com.dbms.parser.SQLParser.SelectStatement subquery = null;
+        
+        // 检查是否是IN (SELECT ...)子查询
+        if (operator.equals("IN") && peekPunctuation("(")) {
+            consume();  // 消费左括号
+            // 检查是否是SELECT语句
+            if (peekKeyword("SELECT")) {
+                consume();  // 消费 SELECT 关键字（因为 parseSelect 期望它已经被消费）
+                // 解析子查询
+                subquery = parseSelect();
+                expectPunctuation(")");
+            } else {
+                // 普通的IN值列表（暂不支持，先抛出异常）
+                throw new SQLException("IN clause with value list not supported yet, use IN (SELECT ...)");
+            }
+        } else if (operator.equals("=") && peekToken(TokenType.IDENTIFIER) && 
             peekToken(1, TokenType.PUNCTUATION, ".")) {
             // 右侧是列名（table.column格式）
             String rightTableRef = expectIdentifier();
@@ -826,7 +1161,12 @@ public class SQLParser {
             value = parseValue();
         }
         
-        DMLExecutor.QueryCondition condition = new DMLExecutor.QueryCondition(columnName, operator, value);
+        DMLExecutor.QueryCondition condition;
+        if (subquery != null) {
+            condition = new DMLExecutor.QueryCondition(columnName, operator, subquery);
+        } else {
+            condition = new DMLExecutor.QueryCondition(columnName, operator, value);
+        }
         return new WhereCondition(condition);
     }
     

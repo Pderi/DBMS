@@ -14,9 +14,14 @@ public class SQLLexer {
         "DELETE", "CREATE", "TABLE", "ALTER", "DROP", "ADD", "COLUMN", "MODIFY",
         "RENAME", "TO", "AS", "AND", "OR", "NOT", "NULL", "PRIMARY", "KEY",
         "INT", "VARCHAR", "CHAR", "DATE", "FLOAT", "DOUBLE", "JOIN", "ON", "INNER", "LEFT", "RIGHT",
-        "LIKE",  // LIKE 操作符
+        "LIKE", "IN",  // LIKE 和 IN 操作符
         "COUNT", "SUM", "AVG", "MAX", "MIN",  // 聚合函数
-        "GROUP", "BY"  // GROUP BY 子句
+        "GROUP", "BY",  // GROUP BY 子句
+        "ORDER", "ASC", "DESC",  // ORDER BY 子句
+        "INDEX", "UNIQUE",  // CREATE INDEX
+        "USER", "IDENTIFIED",  // CREATE USER
+        "GRANT", "REVOKE",  // DCL
+        "BEGIN", "COMMIT", "ROLLBACK", "TRANSACTION"  // 事务
     };
     
     // Token类型

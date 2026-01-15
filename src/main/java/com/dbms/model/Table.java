@@ -3,6 +3,7 @@ package com.dbms.model;
 import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 表结构定义类
@@ -12,11 +13,13 @@ public class Table implements Serializable {
     
     private String name;                    // 表名
     private List<Field> fields;             // 字段列表
+    private Map<String, Index> indexes;     // 索引列表（索引名 -> 索引对象）
     private int recordCount;                 // 记录数量（预留）
     private long lastModified;               // 最后修改时间（预留）
     
     public Table() {
         this.fields = new ArrayList<>();
+        this.indexes = new java.util.HashMap<>();
         this.recordCount = 0;
         this.lastModified = System.currentTimeMillis();
     }
@@ -41,6 +44,50 @@ public class Table implements Serializable {
     
     public void setFields(List<Field> fields) {
         this.fields = fields;
+    }
+    
+    public Map<String, Index> getIndexes() {
+        return indexes;
+    }
+    
+    public void setIndexes(Map<String, Index> indexes) {
+        this.indexes = indexes;
+    }
+    
+    /**
+     * 添加索引
+     */
+    public void addIndex(Index index) {
+        if (indexes.containsKey(index.getIndexName().toLowerCase())) {
+            throw new IllegalArgumentException("Index " + index.getIndexName() + " already exists");
+        }
+        indexes.put(index.getIndexName().toLowerCase(), index);
+    }
+    
+    /**
+     * 删除索引
+     */
+    public boolean removeIndex(String indexName) {
+        return indexes.remove(indexName.toLowerCase()) != null;
+    }
+    
+    /**
+     * 获取索引
+     */
+    public Index getIndex(String indexName) {
+        return indexes.get(indexName.toLowerCase());
+    }
+    
+    /**
+     * 根据字段名获取索引
+     */
+    public Index getIndexByColumn(String columnName) {
+        for (Index index : indexes.values()) {
+            if (index.getColumnName().equalsIgnoreCase(columnName)) {
+                return index;
+            }
+        }
+        return null;
     }
     
     public int getRecordCount() {

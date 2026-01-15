@@ -3,8 +3,11 @@ package com.dbms.ui;
 import com.dbms.engine.*;
 import com.dbms.model.Database;
 import com.dbms.model.Table;
+import com.dbms.model.User;
 import com.dbms.storage.DBFFileManager;
+import com.dbms.util.BackupManager;
 import com.dbms.util.SQLException;
+import com.dbms.util.UserManager;
 
 import javax.swing.*;
 import javax.swing.table.DefaultTableModel;
@@ -14,6 +17,8 @@ import java.awt.*;
 import java.io.File;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 /**
  * 主窗口
@@ -25,6 +30,7 @@ public class MainFrame extends JFrame {
     private DMLExecutor dmlExecutor;
     private QueryExecutor queryExecutor;
     private SQLExecutor sqlExecutor;
+    private UserManager userManager;
     
     private String dbFilePath;
     private String datFilePath;
@@ -100,6 +106,7 @@ public class MainFrame extends JFrame {
         dmlExecutor = new DMLExecutor(ddlExecutor, datFilePath);
         queryExecutor = new QueryExecutor(ddlExecutor, datFilePath);
         sqlExecutor = new SQLExecutor(ddlExecutor, dmlExecutor, queryExecutor);
+        userManager = sqlExecutor.getUserManager(); // 从SQLExecutor获取UserManager实例
     }
     
     private void createUI() {
@@ -534,9 +541,125 @@ public class MainFrame extends JFrame {
         exitItem.addActionListener(e -> System.exit(0));
         fileMenu.add(exitItem);
         
+        fileMenu.addSeparator();
+        
+        JMenuItem backupItem = new JMenuItem("备份数据库");
+        backupItem.setFont(new Font("Microsoft YaHei", Font.PLAIN, 12));
+        backupItem.addActionListener(e -> backupDatabase());
+        fileMenu.add(backupItem);
+        
+        JMenuItem restoreItem = new JMenuItem("恢复数据库");
+        restoreItem.setFont(new Font("Microsoft YaHei", Font.PLAIN, 12));
+        restoreItem.addActionListener(e -> restoreDatabase());
+        fileMenu.add(restoreItem);
+        
         menuBar.add(fileMenu);
         
+        // 用户管理菜单
+        JMenu userMenu = new JMenu("用户管理");
+        userMenu.setFont(new Font("Microsoft YaHei", Font.PLAIN, 13));
+        userMenu.setForeground(new Color(50, 50, 50));
+        
+        JMenuItem userManageItem = new JMenuItem("查看用户列表");
+        userManageItem.setFont(new Font("Microsoft YaHei", Font.PLAIN, 12));
+        userManageItem.addActionListener(e -> showUserManagementDialog());
+        userMenu.add(userManageItem);
+        
+        menuBar.add(userMenu);
+        
         return menuBar;
+    }
+    
+    /**
+     * 显示用户管理对话框
+     */
+    private void showUserManagementDialog() {
+        JDialog dialog = new JDialog(this, "用户管理", true);
+        dialog.setSize(600, 500);
+        dialog.setLocationRelativeTo(this);
+        
+        JPanel mainPanel = new JPanel(new BorderLayout(10, 10));
+        mainPanel.setBorder(BorderFactory.createEmptyBorder(15, 15, 15, 15));
+        
+        // 标题
+        JLabel titleLabel = new JLabel("用户列表");
+        Font titleFont = getDefaultFont().deriveFont(Font.BOLD, 16f);
+        titleLabel.setFont(titleFont);
+        mainPanel.add(titleLabel, BorderLayout.NORTH);
+        
+        // 用户表格
+        String[] columnNames = {"用户名", "权限"};
+        DefaultTableModel userTableModel = new DefaultTableModel(columnNames, 0) {
+            @Override
+            public boolean isCellEditable(int row, int column) {
+                return false; // 表格不可编辑
+            }
+        };
+        JTable userTable = new JTable(userTableModel);
+        userTable.setFont(getDefaultFont().deriveFont(Font.PLAIN, 12f));
+        userTable.setRowHeight(28);
+        userTable.getTableHeader().setFont(getDefaultFont().deriveFont(Font.BOLD, 13f));
+        userTable.getTableHeader().setBackground(new Color(70, 130, 180));
+        userTable.getTableHeader().setForeground(Color.WHITE);
+        userTable.setGridColor(new Color(240, 240, 240));
+        userTable.setShowGrid(true);
+        
+        // 填充用户数据
+        Map<String, User> users = userManager.getAllUsers();
+        for (User user : users.values()) {
+            String username = user.getUsername();
+            Set<String> permissions = user.getPermissions();
+            String permissionsStr;
+            if (permissions.contains("ALL")) {
+                permissionsStr = "ALL (所有权限)";
+            } else if (permissions.isEmpty()) {
+                permissionsStr = "无权限";
+            } else {
+                permissionsStr = String.join(", ", permissions);
+            }
+            userTableModel.addRow(new Object[]{username, permissionsStr});
+        }
+        
+        JScrollPane scrollPane = new JScrollPane(userTable);
+        scrollPane.setBorder(BorderFactory.createCompoundBorder(
+            BorderFactory.createLineBorder(new Color(220, 220, 220), 1),
+            BorderFactory.createEmptyBorder(5, 5, 5, 5)
+        ));
+        mainPanel.add(scrollPane, BorderLayout.CENTER);
+        
+        // 底部按钮
+        JPanel buttonPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT));
+        JButton refreshButton = new JButton("刷新");
+        refreshButton.setFont(getDefaultFont().deriveFont(Font.PLAIN, 12f));
+        refreshButton.addActionListener(e -> {
+            // 重新加载用户数据
+            userTableModel.setRowCount(0);
+            Map<String, User> refreshedUsers = userManager.getAllUsers();
+            for (User user : refreshedUsers.values()) {
+                String username = user.getUsername();
+                Set<String> permissions = user.getPermissions();
+                String permissionsStr;
+                if (permissions.contains("ALL")) {
+                    permissionsStr = "ALL (所有权限)";
+                } else if (permissions.isEmpty()) {
+                    permissionsStr = "无权限";
+                } else {
+                    permissionsStr = String.join(", ", permissions);
+                }
+                userTableModel.addRow(new Object[]{username, permissionsStr});
+            }
+        });
+        
+        JButton closeButton = new JButton("关闭");
+        closeButton.setFont(getDefaultFont().deriveFont(Font.PLAIN, 12f));
+        closeButton.addActionListener(e -> dialog.dispose());
+        
+        buttonPanel.add(refreshButton);
+        buttonPanel.add(closeButton);
+        mainPanel.add(buttonPanel, BorderLayout.SOUTH);
+        
+        dialog.add(mainPanel);
+        dialog.setVisible(true);
     }
     
     private void loadDatabase() {
@@ -551,6 +674,7 @@ public class MainFrame extends JFrame {
                 dmlExecutor = new DMLExecutor(ddlExecutor, datFilePath);
                 queryExecutor = new QueryExecutor(ddlExecutor, datFilePath);
                 sqlExecutor = new SQLExecutor(ddlExecutor, dmlExecutor, queryExecutor);
+                userManager = sqlExecutor.getUserManager();
                 
                 refreshTableList();
                 resultArea.setText("数据库加载成功！当前数据库文件: " + dbFilePath + "\n" +
@@ -609,7 +733,7 @@ public class MainFrame extends JFrame {
             }
             
             // 执行SELECT查询
-            QueryExecutor.QueryResult result = queryExecutor.select(tableName, null, null, null);
+            QueryExecutor.QueryResult result = queryExecutor.select(tableName, null, null, null, null);
             
             System.out.println("查询表 [" + tableName + "] 返回 " + result.getRowCount() + " 行数据");
             
@@ -913,6 +1037,7 @@ public class MainFrame extends JFrame {
             dmlExecutor = new DMLExecutor(ddlExecutor, datFilePath);
             queryExecutor = new QueryExecutor(ddlExecutor, datFilePath);
             sqlExecutor = new SQLExecutor(ddlExecutor, dmlExecutor, queryExecutor);
+            userManager = sqlExecutor.getUserManager();
             
             try {
                 DBFFileManager.createDatabaseFile(dbFilePath, database);
@@ -924,6 +1049,68 @@ public class MainFrame extends JFrame {
             } catch (Exception e) {
                 JOptionPane.showMessageDialog(this, "Error creating database: " + e.getMessage(),
                     "Error", JOptionPane.ERROR_MESSAGE);
+            }
+        }
+    }
+    
+    private void backupDatabase() {
+        JFileChooser dirChooser = new JFileChooser();
+        dirChooser.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY);
+        dirChooser.setDialogTitle("选择备份目录");
+        
+        if (dirChooser.showSaveDialog(this) == JFileChooser.APPROVE_OPTION) {
+            try {
+                String backupDir = dirChooser.getSelectedFile().getAbsolutePath();
+                String backupPath = BackupManager.backupDatabase(dbFilePath, backupDir);
+                JOptionPane.showMessageDialog(this, 
+                    "数据库备份成功！\n备份文件: " + backupPath,
+                    "备份成功", JOptionPane.INFORMATION_MESSAGE);
+            } catch (Exception e) {
+                JOptionPane.showMessageDialog(this, 
+                    "备份失败: " + e.getMessage(),
+                    "错误", JOptionPane.ERROR_MESSAGE);
+                e.printStackTrace();
+            }
+        }
+    }
+    
+    private void restoreDatabase() {
+        JFileChooser fileChooser = new JFileChooser();
+        fileChooser.setFileFilter(new javax.swing.filechooser.FileFilter() {
+            @Override
+            public boolean accept(File f) {
+                return f.isDirectory() || (f.getName().endsWith(".dbf") && f.getName().contains("_backup_"));
+            }
+            
+            @Override
+            public String getDescription() {
+                return "Backup Files (*_backup_*.dbf)";
+            }
+        });
+        fileChooser.setDialogTitle("选择备份文件");
+        
+        if (fileChooser.showOpenDialog(this) == JFileChooser.APPROVE_OPTION) {
+            int confirm = JOptionPane.showConfirmDialog(this,
+                "恢复数据库将覆盖当前数据库文件，是否继续？",
+                "确认恢复", JOptionPane.YES_NO_OPTION);
+            
+            if (confirm == JOptionPane.YES_OPTION) {
+                try {
+                    String backupFilePath = fileChooser.getSelectedFile().getAbsolutePath();
+                    BackupManager.restoreDatabase(backupFilePath, dbFilePath);
+                    
+                    // 重新加载数据库
+                    loadDatabase();
+                    
+                    JOptionPane.showMessageDialog(this, 
+                        "数据库恢复成功！",
+                        "恢复成功", JOptionPane.INFORMATION_MESSAGE);
+                } catch (Exception e) {
+                    JOptionPane.showMessageDialog(this, 
+                        "恢复失败: " + e.getMessage(),
+                        "错误", JOptionPane.ERROR_MESSAGE);
+                    e.printStackTrace();
+                }
             }
         }
     }
