@@ -19,6 +19,11 @@ public class DATFileManager {
      * 获取表的数据文件路径
      */
     public static String getTableDataFilePath(String basePath, String tableName) {
+        // 处理null情况
+        if (basePath == null || basePath.isEmpty()) {
+            basePath = "database.dat";
+        }
+        
         // 如果basePath是完整路径，提取目录
         String dir = basePath;
         String baseName = "database";

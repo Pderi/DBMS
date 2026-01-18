@@ -107,6 +107,7 @@ public class MainFrame extends JFrame {
         queryExecutor = new QueryExecutor(ddlExecutor, datFilePath);
         sqlExecutor = new SQLExecutor(ddlExecutor, dmlExecutor, queryExecutor);
         userManager = sqlExecutor.getUserManager(); // 从SQLExecutor获取UserManager实例
+        updateWindowTitle(); // 更新窗口标题
     }
     
     private void createUI() {
@@ -560,6 +561,18 @@ public class MainFrame extends JFrame {
         userMenu.setFont(new Font("Microsoft YaHei", Font.PLAIN, 13));
         userMenu.setForeground(new Color(50, 50, 50));
         
+        JMenuItem loginItem = new JMenuItem("用户登录");
+        loginItem.setFont(new Font("Microsoft YaHei", Font.PLAIN, 12));
+        loginItem.addActionListener(e -> showLoginDialog());
+        userMenu.add(loginItem);
+        
+        JMenuItem logoutItem = new JMenuItem("用户登出");
+        logoutItem.setFont(new Font("Microsoft YaHei", Font.PLAIN, 12));
+        logoutItem.addActionListener(e -> logoutUser());
+        userMenu.add(logoutItem);
+        
+        userMenu.addSeparator();
+        
         JMenuItem userManageItem = new JMenuItem("查看用户列表");
         userManageItem.setFont(new Font("Microsoft YaHei", Font.PLAIN, 12));
         userManageItem.addActionListener(e -> showUserManagementDialog());
@@ -662,6 +675,144 @@ public class MainFrame extends JFrame {
         dialog.setVisible(true);
     }
     
+    /**
+     * 显示用户登录对话框
+     */
+    private void showLoginDialog() {
+        JDialog dialog = new JDialog(this, "用户登录", true);
+        dialog.setSize(400, 200);
+        dialog.setLocationRelativeTo(this);
+        
+        JPanel mainPanel = new JPanel(new BorderLayout(10, 10));
+        mainPanel.setBorder(BorderFactory.createEmptyBorder(20, 20, 20, 20));
+        
+        // 输入面板
+        JPanel inputPanel = new JPanel(new GridBagLayout());
+        GridBagConstraints gbc = new GridBagConstraints();
+        gbc.insets = new Insets(5, 5, 5, 5);
+        gbc.anchor = GridBagConstraints.WEST;
+        
+        // 用户名
+        gbc.gridx = 0;
+        gbc.gridy = 0;
+        JLabel usernameLabel = new JLabel("用户名:");
+        usernameLabel.setFont(getDefaultFont().deriveFont(Font.PLAIN, 12f));
+        inputPanel.add(usernameLabel, gbc);
+        
+        gbc.gridx = 1;
+        gbc.fill = GridBagConstraints.HORIZONTAL;
+        gbc.weightx = 1.0;
+        JTextField usernameField = new JTextField(20);
+        usernameField.setFont(getDefaultFont().deriveFont(Font.PLAIN, 12f));
+        inputPanel.add(usernameField, gbc);
+        
+        // 密码
+        gbc.gridx = 0;
+        gbc.gridy = 1;
+        gbc.fill = GridBagConstraints.NONE;
+        gbc.weightx = 0;
+        JLabel passwordLabel = new JLabel("密码:");
+        passwordLabel.setFont(getDefaultFont().deriveFont(Font.PLAIN, 12f));
+        inputPanel.add(passwordLabel, gbc);
+        
+        gbc.gridx = 1;
+        gbc.fill = GridBagConstraints.HORIZONTAL;
+        gbc.weightx = 1.0;
+        JPasswordField passwordField = new JPasswordField(20);
+        passwordField.setFont(getDefaultFont().deriveFont(Font.PLAIN, 12f));
+        inputPanel.add(passwordField, gbc);
+        
+        mainPanel.add(inputPanel, BorderLayout.CENTER);
+        
+        // 按钮面板
+        JPanel buttonPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT));
+        JButton loginButton = new JButton("登录");
+        loginButton.setFont(getDefaultFont().deriveFont(Font.PLAIN, 12f));
+        loginButton.addActionListener(e -> {
+            String username = usernameField.getText().trim();
+            String password = new String(passwordField.getPassword());
+            
+            if (username.isEmpty() || password.isEmpty()) {
+                JOptionPane.showMessageDialog(dialog,
+                    "请输入用户名和密码",
+                    "输入错误", JOptionPane.WARNING_MESSAGE);
+                return;
+            }
+            
+            try {
+                if (userManager.login(username, password)) {
+                    User currentUser = userManager.getCurrentUser();
+                    Set<String> permissions = currentUser.getPermissions();
+                    String permissionsStr = permissions.contains("ALL") ? "ALL (所有权限)" :
+                        permissions.isEmpty() ? "无权限" : String.join(", ", permissions);
+                    
+                    JOptionPane.showMessageDialog(dialog,
+                        "登录成功！\n当前用户: " + username + "\n权限: " + permissionsStr,
+                        "登录成功", JOptionPane.INFORMATION_MESSAGE);
+                    dialog.dispose();
+                    
+                    // 更新窗口标题显示当前用户
+                    updateWindowTitle();
+                } else {
+                    JOptionPane.showMessageDialog(dialog,
+                        "用户名或密码错误",
+                        "登录失败", JOptionPane.ERROR_MESSAGE);
+                }
+            } catch (Exception ex) {
+                JOptionPane.showMessageDialog(dialog,
+                    "登录失败: " + ex.getMessage(),
+                    "错误", JOptionPane.ERROR_MESSAGE);
+            }
+        });
+        
+        JButton cancelButton = new JButton("取消");
+        cancelButton.setFont(getDefaultFont().deriveFont(Font.PLAIN, 12f));
+        cancelButton.addActionListener(e -> dialog.dispose());
+        
+        buttonPanel.add(loginButton);
+        buttonPanel.add(cancelButton);
+        mainPanel.add(buttonPanel, BorderLayout.SOUTH);
+        
+        dialog.add(mainPanel);
+        dialog.setVisible(true);
+    }
+    
+    /**
+     * 用户登出
+     */
+    private void logoutUser() {
+        if (userManager.getCurrentUser() == null) {
+            JOptionPane.showMessageDialog(this,
+                "当前没有登录的用户",
+                "提示", JOptionPane.INFORMATION_MESSAGE);
+            return;
+        }
+        
+        int confirm = JOptionPane.showConfirmDialog(this,
+            "确定要登出吗？",
+            "确认登出", JOptionPane.YES_NO_OPTION);
+        
+        if (confirm == JOptionPane.YES_OPTION) {
+            userManager.logout();
+            updateWindowTitle();
+            JOptionPane.showMessageDialog(this,
+                "已成功登出",
+                "登出成功", JOptionPane.INFORMATION_MESSAGE);
+        }
+    }
+    
+    /**
+     * 更新窗口标题（显示当前登录用户）
+     */
+    private void updateWindowTitle() {
+        User currentUser = userManager.getCurrentUser();
+        if (currentUser != null) {
+            setTitle("DBMS - 数据库管理系统 [当前用户: " + currentUser.getUsername() + "]");
+        } else {
+            setTitle("DBMS - 数据库管理系统");
+        }
+    }
+    
     private void loadDatabase() {
         try {
             File dbFile = new File(dbFilePath);
@@ -675,6 +826,7 @@ public class MainFrame extends JFrame {
                 queryExecutor = new QueryExecutor(ddlExecutor, datFilePath);
                 sqlExecutor = new SQLExecutor(ddlExecutor, dmlExecutor, queryExecutor);
                 userManager = sqlExecutor.getUserManager();
+                updateWindowTitle(); // 更新窗口标题
                 
                 refreshTableList();
                 resultArea.setText("数据库加载成功！当前数据库文件: " + dbFilePath + "\n" +
@@ -1038,6 +1190,7 @@ public class MainFrame extends JFrame {
             queryExecutor = new QueryExecutor(ddlExecutor, datFilePath);
             sqlExecutor = new SQLExecutor(ddlExecutor, dmlExecutor, queryExecutor);
             userManager = sqlExecutor.getUserManager();
+            updateWindowTitle(); // 更新窗口标题
             
             try {
                 DBFFileManager.createDatabaseFile(dbFilePath, database);

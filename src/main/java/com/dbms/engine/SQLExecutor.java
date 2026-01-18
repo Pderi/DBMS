@@ -39,6 +39,27 @@ public class SQLExecutor {
     }
     
     /**
+     * 检查当前用户是否有指定权限
+     * @param permission 需要的权限
+     * @param allowNoLogin 如果为true，未登录时允许执行（用于某些特殊操作）
+     * @throws SQLException 如果没有权限
+     */
+    private void checkPermission(String permission, boolean allowNoLogin) {
+        User currentUser = userManager.getCurrentUser();
+        if (currentUser == null) {
+            if (allowNoLogin) {
+                return; // 允许未登录用户执行
+            } else {
+                throw new SQLException("Permission denied: User not logged in. Please login first.");
+            }
+        }
+        
+        if (!userManager.hasPermission(permission) && !userManager.hasPermission("ALL")) {
+            throw new SQLException("Permission denied: " + permission + " privilege required. Current user: " + currentUser.getUsername());
+        }
+    }
+    
+    /**
      * 执行SQL语句
      */
     public Object execute(String sql) {
@@ -87,6 +108,7 @@ public class SQLExecutor {
     }
     
     private String executeCreateTable(CreateTableStatement stmt) {
+        checkPermission("CREATE_TABLE", false);
         java.util.List<Field> fields = new java.util.ArrayList<>();
         for (FieldDefinition fieldDef : stmt.fields) {
             fields.add(fieldDef.toField());
@@ -96,16 +118,19 @@ public class SQLExecutor {
     }
     
     private String executeCreateIndex(CreateIndexStatement stmt) {
+        checkPermission("CREATE_INDEX", false);
         ddlExecutor.createIndex(stmt.indexName, stmt.tableName, stmt.columnName, stmt.unique);
         return "Index '" + stmt.indexName + "' created successfully on " + stmt.tableName + "(" + stmt.columnName + ")";
     }
     
     private String executeCreateUser(CreateUserStatement stmt) {
+        checkPermission("CREATE_USER", true); // 允许未登录用户创建第一个用户
         userManager.createUser(stmt.username, stmt.password);
         return "User '" + stmt.username + "' created successfully";
     }
     
     private String executeAlterTable(AlterTableStatement stmt) {
+        checkPermission("ALTER_TABLE", false);
         switch (stmt.alterType) {
             case "ADD":
                 ddlExecutor.addColumn(stmt.tableName, stmt.fieldDef.toField());
@@ -126,21 +151,25 @@ public class SQLExecutor {
     }
     
     private String executeDropTable(DropTableStatement stmt) {
+        checkPermission("DROP_TABLE", false);
         ddlExecutor.dropTable(stmt.tableName);
         return "Table '" + stmt.tableName + "' dropped successfully";
     }
     
     private String executeDropUser(DropUserStatement stmt) {
+        checkPermission("DROP_USER", false);
         userManager.deleteUser(stmt.username);
         return "User '" + stmt.username + "' dropped successfully";
     }
     
     private String executeRenameTable(RenameTableStatement stmt) {
+        checkPermission("ALTER_TABLE", false);
         ddlExecutor.renameTable(stmt.oldName, stmt.newName);
         return "Table renamed from '" + stmt.oldName + "' to '" + stmt.newName + "'";
     }
     
     private String executeInsert(InsertStatement stmt) {
+        checkPermission("INSERT", false);
         if (stmt.columnNames.isEmpty()) {
             dmlExecutor.insert(stmt.tableName, stmt.values);
         } else {
@@ -150,6 +179,7 @@ public class SQLExecutor {
     }
     
     private String executeUpdate(UpdateStatement stmt) {
+        checkPermission("UPDATE", false);
         // 将表达式列表转换为值列表（在执行时计算表达式）
         java.util.List<Object> values = new java.util.ArrayList<>();
         for (SQLParser.UpdateExpression expr : stmt.expressions) {
@@ -165,11 +195,13 @@ public class SQLExecutor {
     }
     
     private String executeDelete(DeleteStatement stmt) {
+        checkPermission("DELETE", false);
         int count = dmlExecutor.delete(stmt.tableName, stmt.whereCondition);
         return count + " row(s) deleted";
     }
     
     private QueryResult executeSelect(SelectStatement stmt) {
+        checkPermission("SELECT", false);
         // 处理列名：将 alias.column 转换为 column（保留别名信息用于显示）
         java.util.List<String> processedColumnNames = new java.util.ArrayList<>();
         for (String colName : stmt.columnNames) {
@@ -213,12 +245,7 @@ public class SQLExecutor {
     }
     
     private String executeGrant(GrantStatement stmt) {
-        // 检查当前用户是否有GRANT权限
-        // 如果没有当前用户（未登录），允许执行（简化权限管理，适用于教学系统）
-        User currentUser = userManager.getCurrentUser();
-        if (currentUser != null && !userManager.hasPermission("GRANT") && !userManager.hasPermission("ALL")) {
-            throw new SQLException("Permission denied: GRANT privilege required");
-        }
+        checkPermission("GRANT", true); // 允许未登录用户执行（用于初始化）
         
         for (String permission : stmt.permissions) {
             userManager.grantPermission(stmt.username, permission);
@@ -227,12 +254,7 @@ public class SQLExecutor {
     }
     
     private String executeRevoke(RevokeStatement stmt) {
-        // 检查当前用户是否有REVOKE权限
-        // 如果没有当前用户（未登录），允许执行（简化权限管理，适用于教学系统）
-        User currentUser = userManager.getCurrentUser();
-        if (currentUser != null && !userManager.hasPermission("REVOKE") && !userManager.hasPermission("ALL")) {
-            throw new SQLException("Permission denied: REVOKE privilege required");
-        }
+        checkPermission("REVOKE", true); // 允许未登录用户执行（用于初始化）
         
         for (String permission : stmt.permissions) {
             userManager.revokePermission(stmt.username, permission);

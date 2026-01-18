@@ -47,9 +47,22 @@ public class BackupManager {
         Database database = DBFFileManager.readDatabaseFile(dbFilePath);
         
         // 备份所有表的.dat文件
+        // 如果datFilePath为null，使用dbFilePath的目录
+        String baseDatPath = database.getDatFilePath();
+        if (baseDatPath == null || baseDatPath.isEmpty()) {
+            // 从dbFilePath推断dat文件路径
+            File dbFileObj = new File(dbFilePath);
+            String dbDir = dbFileObj.getParent();
+            if (dbDir == null) {
+                dbDir = ".";
+            }
+            String dbBaseName = dbFileObj.getName().replace(".dbf", "");
+            baseDatPath = new File(dbDir, dbBaseName + ".dat").getAbsolutePath();
+        }
+        
         for (String tableName : database.getTableNames()) {
             String datFilePath = com.dbms.storage.DATFileManager.getTableDataFilePath(
-                database.getDatFilePath(), tableName);
+                baseDatPath, tableName);
             File datFile = new File(datFilePath);
             
             if (datFile.exists()) {
