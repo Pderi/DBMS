@@ -613,7 +613,7 @@ public class MainFrame extends JFrame {
         userTable.setRowHeight(28);
         userTable.getTableHeader().setFont(getDefaultFont().deriveFont(Font.BOLD, 13f));
         userTable.getTableHeader().setBackground(new Color(70, 130, 180));
-        userTable.getTableHeader().setForeground(Color.WHITE);
+        userTable.getTableHeader().setForeground(Color.BLACK);
         userTable.setGridColor(new Color(240, 240, 240));
         userTable.setShowGrid(true);
         
