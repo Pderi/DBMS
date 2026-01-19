@@ -45,6 +45,8 @@ public class MainFrame extends JFrame {
     private DefaultTableModel structureTableModel;
     private JTable dataTable;
     private DefaultTableModel dataTableModel;
+    private JTable indexTable;
+    private DefaultTableModel indexTableModel;
     
     public MainFrame() {
         super("DBMS - 数据库管理系统");
@@ -397,7 +399,7 @@ public class MainFrame extends JFrame {
         structureTitlePanel.add(structureLabel);
         
         structureTableModel = new DefaultTableModel(
-            new Object[]{"字段名", "类型", "长度", "主键", "可空"}, 0);
+            new Object[]{"字段名", "类型", "长度", "主键", "可空", "索引"}, 0);
         structureTable = new JTable(structureTableModel);
         structureTable.setFont(getDefaultFont().deriveFont(Font.PLAIN, 12f));
         structureTable.setRowHeight(28);
@@ -434,10 +436,67 @@ public class MainFrame extends JFrame {
             BorderFactory.createEmptyBorder(2, 2, 2, 2)
         ));
         
+        // 索引列表标题面板
+        JPanel indexTitlePanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
+        indexTitlePanel.setBackground(new Color(70, 130, 180));
+        indexTitlePanel.setBorder(BorderFactory.createEmptyBorder(8, 12, 8, 12));
+        JLabel indexLabel = new JLabel("索引列表");
+        Font titleFont6 = getDefaultFont().deriveFont(Font.BOLD, 15f);
+        indexLabel.setFont(titleFont6);
+        indexLabel.setForeground(Color.WHITE);
+        indexTitlePanel.add(indexLabel);
+        
+        indexTableModel = new DefaultTableModel(
+            new Object[]{"索引名", "字段名", "唯一索引"}, 0);
+        indexTable = new JTable(indexTableModel);
+        indexTable.setFont(getDefaultFont().deriveFont(Font.PLAIN, 12f));
+        indexTable.setRowHeight(28);
+        indexTable.setEnabled(false);
+        indexTable.setBackground(new Color(255, 255, 255));
+        indexTable.setGridColor(new Color(240, 240, 240));
+        indexTable.setShowGrid(true);
+        indexTable.setIntercellSpacing(new Dimension(1, 1));
+        indexTable.getTableHeader().setFont(getDefaultFont().deriveFont(Font.BOLD, 14f));
+        indexTable.getTableHeader().setBackground(new Color(50, 100, 180));
+        indexTable.getTableHeader().setForeground(Color.WHITE);
+        indexTable.getTableHeader().setPreferredSize(new Dimension(0, 38));
+        indexTable.getTableHeader().setReorderingAllowed(false);
+        indexTable.getTableHeader().setOpaque(true);
+        indexTable.getTableHeader().setDefaultRenderer(new javax.swing.table.DefaultTableCellRenderer() {
+            @Override
+            public java.awt.Component getTableCellRendererComponent(JTable table, Object value,
+                    boolean isSelected, boolean hasFocus, int row, int column) {
+                super.getTableCellRendererComponent(table, value, isSelected, hasFocus, row, column);
+                setBackground(new Color(50, 100, 180));
+                setForeground(Color.WHITE);
+                setFont(getDefaultFont().deriveFont(Font.BOLD, 14f));
+                setHorizontalAlignment(SwingConstants.CENTER);
+                setBorder(BorderFactory.createEmptyBorder(8, 8, 8, 8));
+                return this;
+            }
+        });
+        JScrollPane indexScroll = new JScrollPane(indexTable);
+        indexScroll.setBorder(BorderFactory.createCompoundBorder(
+            BorderFactory.createLineBorder(new Color(220, 220, 220), 1),
+            BorderFactory.createEmptyBorder(2, 2, 2, 2)
+        ));
+        
+        JPanel indexPanel = new JPanel(new BorderLayout(0, 0));
+        indexPanel.setBackground(new Color(250, 250, 255));
+        indexPanel.add(indexTitlePanel, BorderLayout.NORTH);
+        indexPanel.add(indexScroll, BorderLayout.CENTER);
+        
+        // 表结构面板（包含字段表格和索引表格）
+        JSplitPane structureSplitPane = new JSplitPane(JSplitPane.VERTICAL_SPLIT, structureScroll, indexPanel);
+        structureSplitPane.setDividerLocation(200);
+        structureSplitPane.setResizeWeight(0.6);
+        structureSplitPane.setBorder(BorderFactory.createEmptyBorder());
+        structureSplitPane.setDividerSize(6);
+        
         JPanel structurePanel = new JPanel(new BorderLayout(0, 0));
         structurePanel.setBackground(new Color(250, 250, 255));
         structurePanel.add(structureTitlePanel, BorderLayout.NORTH);
-        structurePanel.add(structureScroll, BorderLayout.CENTER);
+        structurePanel.add(structureSplitPane, BorderLayout.CENTER);
         
         // 数据表格标题面板
         JPanel dataTitlePanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
@@ -862,15 +921,36 @@ public class MainFrame extends JFrame {
         Table table = database.getTable(tableName);
         if (table == null) return;
         
+        // 显示字段信息
         structureTableModel.setRowCount(0);
         for (com.dbms.model.Field field : table.getFields()) {
+            // 查找该字段上的索引
+            com.dbms.model.Index index = table.getIndexByColumn(field.getName());
+            String indexInfo = "";
+            if (index != null) {
+                indexInfo = index.getIndexName() + (index.isUnique() ? " (唯一)" : "");
+            }
+            
             structureTableModel.addRow(new Object[]{
                 field.getName(),
                 field.getType().getSqlName(),
                 field.getLength(),
                 field.isKey() ? "是" : "否",
-                field.isNullable() ? "是" : "否"
+                field.isNullable() ? "是" : "否",
+                indexInfo.isEmpty() ? "无" : indexInfo
             });
+        }
+        
+        // 显示索引列表
+        indexTableModel.setRowCount(0);
+        if (table.getIndexes() != null && !table.getIndexes().isEmpty()) {
+            for (com.dbms.model.Index index : table.getIndexes().values()) {
+                indexTableModel.addRow(new Object[]{
+                    index.getIndexName(),
+                    index.getColumnName(),
+                    index.isUnique() ? "是" : "否"
+                });
+            }
         }
     }
     
@@ -885,7 +965,7 @@ public class MainFrame extends JFrame {
             }
             
             // 执行SELECT查询
-            QueryExecutor.QueryResult result = queryExecutor.select(tableName, null, null, null, null);
+            QueryExecutor.QueryResult result = queryExecutor.select(tableName, null, null, null, null, null, null);
             
             System.out.println("查询表 [" + tableName + "] 返回 " + result.getRowCount() + " 行数据");
             

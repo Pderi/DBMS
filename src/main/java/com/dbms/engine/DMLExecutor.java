@@ -528,14 +528,27 @@ public class DMLExecutor {
      */
     public static class QueryCondition {
         public String columnName;
-        public String operator; // =, <, >, <=, >=, !=, LIKE, IN
+        public String operator; // =, <, >, <=, >=, !=, LIKE, IN, NOT IN, BETWEEN
         public Object value;
+        public Object minValue;  // BETWEEN 的最小值
+        public Object maxValue;  // BETWEEN 的最大值
         public com.dbms.parser.SQLParser.SelectStatement subquery;  // 子查询（用于IN子句）
         
         public QueryCondition(String columnName, String operator, Object value) {
             this.columnName = columnName;
             this.operator = operator;
             this.value = value;
+            this.minValue = null;
+            this.maxValue = null;
+            this.subquery = null;
+        }
+        
+        public QueryCondition(String columnName, String operator, Object minValue, Object maxValue) {
+            this.columnName = columnName;
+            this.operator = operator;
+            this.value = null;
+            this.minValue = minValue;
+            this.maxValue = maxValue;
             this.subquery = null;
         }
         
@@ -543,6 +556,8 @@ public class DMLExecutor {
             this.columnName = columnName;
             this.operator = operator;
             this.value = null;
+            this.minValue = null;
+            this.maxValue = null;
             this.subquery = subquery;
         }
         
@@ -566,6 +581,25 @@ public class DMLExecutor {
             
             Object recordValue = record.getValue(table, columnName);
             
+            // 对于 BETWEEN 操作符，需要特殊处理（因为 value 为 null）
+            if (operator.equals("BETWEEN")) {
+                if (minValue == null || maxValue == null || recordValue == null) {
+                    return false;
+                }
+                // BETWEEN 包含边界值：minValue <= recordValue <= maxValue
+                int cmpMin = compare(recordValue, minValue);
+                int cmpMax = compare(recordValue, maxValue);
+                boolean result = cmpMin >= 0 && cmpMax <= 0;
+                // 调试输出
+                System.out.println("BETWEEN检查: column=" + columnName + ", recordValue=" + recordValue + 
+                    " (" + (recordValue != null ? recordValue.getClass().getSimpleName() : "null") + ")" +
+                    ", minValue=" + minValue + " (" + (minValue != null ? minValue.getClass().getSimpleName() : "null") + ")" +
+                    ", maxValue=" + maxValue + " (" + (maxValue != null ? maxValue.getClass().getSimpleName() : "null") + ")" +
+                    ", cmpMin=" + cmpMin + ", cmpMax=" + cmpMax + ", result=" + result);
+                return result;
+            }
+            
+            // 对于其他操作符，检查 null 值
             if (recordValue == null || value == null) {
                 return operator.equals("=") && recordValue == value;
             }

@@ -14,7 +14,7 @@ public class SQLLexer {
         "DELETE", "CREATE", "TABLE", "ALTER", "DROP", "ADD", "COLUMN", "MODIFY",
         "RENAME", "TO", "AS", "AND", "OR", "NOT", "NULL", "PRIMARY", "KEY",
         "INT", "VARCHAR", "CHAR", "DATE", "FLOAT", "DOUBLE", "JOIN", "ON", "INNER", "LEFT", "RIGHT",
-        "LIKE", "IN",  // LIKE 和 IN 操作符
+        "LIKE", "IN", "BETWEEN",  // LIKE、IN 和 BETWEEN 操作符
         "COUNT", "SUM", "AVG", "MAX", "MIN",  // 聚合函数
         "GROUP", "BY",  // GROUP BY 子句
         "ORDER", "ASC", "DESC",  // ORDER BY 子句

@@ -174,6 +174,7 @@ public class SQLParser {
     public static class SelectStatement extends SQLStatement {
         public List<String> columnNames;
         public List<String> columnAliases;  // 列别名列表，与columnNames一一对应
+        public List<SelectStatement> subqueryColumns;  // 子查询列（标量子查询），与columnNames一一对应
         public List<String> tableNames;
         public java.util.Map<String, String> tableAliases; // 别名 -> 真实表名
         public List<QueryExecutor.JoinCondition> joinConditions;
@@ -185,6 +186,7 @@ public class SQLParser {
             this.type = StatementType.SELECT;
             this.columnNames = new ArrayList<>();
             this.columnAliases = new ArrayList<>();
+            this.subqueryColumns = new ArrayList<>();
             this.tableNames = new ArrayList<>();
             this.tableAliases = new java.util.HashMap<>();
             this.groupByColumns = new ArrayList<>();
@@ -822,10 +824,20 @@ public class SQLParser {
             while (true) {
                 String colName;
                 String colAlias = null;
+                SelectStatement subqueryColumn = null;
                 
-                // 检查是否是聚合函数（COUNT, SUM, AVG, MAX, MIN）
-                if (peekKeyword("COUNT") || peekKeyword("SUM") || peekKeyword("AVG") || 
+                // 检查是否是子查询作为列（标量子查询）：(SELECT ...)
+                if (peekPunctuation("(") && peekToken(1, TokenType.KEYWORD, "SELECT")) {
+                    consume();  // 消费左括号
+                    consume();  // 消费 SELECT 关键字（因为 parseSelect 期望它已经被消费）
+                    // 解析子查询
+                    subqueryColumn = parseSelect();
+                    expectPunctuation(")");
+                    // 子查询列名使用特殊标记，实际值在执行时计算
+                    colName = "__SUBQUERY__";
+                } else if (peekKeyword("COUNT") || peekKeyword("SUM") || peekKeyword("AVG") || 
                     peekKeyword("MAX") || peekKeyword("MIN")) {
+                    // 检查是否是聚合函数（COUNT, SUM, AVG, MAX, MIN）
                     String funcName = consume().value;  // 消费函数名
                     expectPunctuation("(");
                     
@@ -860,6 +872,7 @@ public class SQLParser {
                 }
                 
                 stmt.columnNames.add(colName);
+                stmt.subqueryColumns.add(subqueryColumn);
                 
                 // 检查是否有列别名（AS 关键字或直接标识符）
                 if (peekKeyword("AS")) {
@@ -1120,24 +1133,45 @@ public class SQLParser {
             columnName = expectIdentifier();
         }
         
-        // 解析操作符（支持 LIKE 和 IN 关键字）
+        // 解析操作符（支持 LIKE、IN、NOT IN 和 BETWEEN 关键字）
         String operator;
-        if (peekKeyword("LIKE")) {
+        if (peekKeyword("NOT") && peekToken(1, TokenType.KEYWORD, "IN")) {
+            // 处理 NOT IN
+            consume();  // 消费 NOT 关键字
+            consume();  // 消费 IN 关键字
+            operator = "NOT IN";
+        } else if (peekKeyword("LIKE")) {
             consume();  // 消费 LIKE 关键字
             operator = "LIKE";
         } else if (peekKeyword("IN")) {
             consume();  // 消费 IN 关键字
             operator = "IN";
+        } else if (peekKeyword("BETWEEN")) {
+            consume();  // 消费 BETWEEN 关键字
+            operator = "BETWEEN";
         } else {
             operator = expectOperator();
         }
         
         // 对于等号操作符，检查右侧是否是列名（table.column格式）而不是值
         Object value = null;
+        Object minValue = null;
+        Object maxValue = null;
         com.dbms.parser.SQLParser.SelectStatement subquery = null;
         
-        // 检查是否是IN (SELECT ...)子查询
-        if (operator.equals("IN") && peekPunctuation("(")) {
+        // 处理 BETWEEN ... AND ... 语法
+        if (operator.equals("BETWEEN")) {
+            // 解析第一个值（最小值）
+            minValue = parseValue();
+            // 期望 AND 关键字
+            if (!peekKeyword("AND")) {
+                throw new SQLException("Expected AND after BETWEEN value");
+            }
+            consume();  // 消费 AND 关键字
+            // 解析第二个值（最大值）
+            maxValue = parseValue();
+        } else if ((operator.equals("IN") || operator.equals("NOT IN")) && peekPunctuation("(")) {
+            // 检查是否是IN (SELECT ...)或NOT IN (SELECT ...)子查询
             consume();  // 消费左括号
             // 检查是否是SELECT语句
             if (peekKeyword("SELECT")) {
@@ -1162,7 +1196,9 @@ public class SQLParser {
         }
         
         DMLExecutor.QueryCondition condition;
-        if (subquery != null) {
+        if (operator.equals("BETWEEN")) {
+            condition = new DMLExecutor.QueryCondition(columnName, operator, minValue, maxValue);
+        } else if (subquery != null) {
             condition = new DMLExecutor.QueryCondition(columnName, operator, subquery);
         } else {
             condition = new DMLExecutor.QueryCondition(columnName, operator, value);
@@ -1187,18 +1223,31 @@ public class SQLParser {
             columnName = expectIdentifier();
         }
         
-        // 解析操作符（支持 LIKE 关键字）
+        // 解析操作符（支持 LIKE 和 BETWEEN 关键字）
         String operator;
         if (peekKeyword("LIKE")) {
             consume();  // 消费 LIKE 关键字
             operator = "LIKE";
+        } else if (peekKeyword("BETWEEN")) {
+            consume();  // 消费 BETWEEN 关键字
+            operator = "BETWEEN";
         } else {
             operator = expectOperator();
         }
         
-        Object value = parseValue();
-        
-        return new DMLExecutor.QueryCondition(columnName, operator, value);
+        // 处理 BETWEEN ... AND ... 语法
+        if (operator.equals("BETWEEN")) {
+            Object minValue = parseValue();
+            if (!peekKeyword("AND")) {
+                throw new SQLException("Expected AND after BETWEEN value");
+            }
+            consume();  // 消费 AND 关键字
+            Object maxValue = parseValue();
+            return new DMLExecutor.QueryCondition(columnName, operator, minValue, maxValue);
+        } else {
+            Object value = parseValue();
+            return new DMLExecutor.QueryCondition(columnName, operator, value);
+        }
     }
     
     /**

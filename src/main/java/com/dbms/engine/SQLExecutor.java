@@ -227,11 +227,13 @@ public class SQLExecutor {
         if (stmt.tableNames.size() == 1) {
             // 单表查询
             result = queryExecutor.select(stmt.tableNames.get(0), processedColumnNames, 
-                                         stmt.whereCondition, stmt.groupByColumns, stmt.orderByColumns);
+                                         stmt.whereCondition, stmt.groupByColumns, stmt.orderByColumns,
+                                         stmt.subqueryColumns, stmt.tableAliases);
         } else if (stmt.tableNames.size() >= 2) {
             // 多表连接（支持2个或更多表）
             result = queryExecutor.join(stmt.tableNames, processedColumnNames, 
-                stmt.joinConditions, stmt.whereCondition, stmt.groupByColumns, stmt.tableAliases, stmt.orderByColumns);
+                stmt.joinConditions, stmt.whereCondition, stmt.groupByColumns, stmt.tableAliases, stmt.orderByColumns,
+                stmt.subqueryColumns);
         } else {
             throw new SQLException("No tables specified in SELECT statement");
         }

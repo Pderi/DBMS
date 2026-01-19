@@ -38,7 +38,16 @@ public class QueryExecutor {
     public QueryResult select(String tableName, List<String> columnNames, 
                              SQLParser.WhereCondition whereCondition,
                              List<String> groupByColumns,
-                             List<SQLParser.OrderByItem> orderByColumns) {
+                             List<SQLParser.OrderByItem> orderByColumns,
+                             List<SQLParser.SelectStatement> subqueryColumns,
+                             java.util.Map<String, String> tableAliases) {
+        // 如果参数为null，初始化为空
+        if (subqueryColumns == null) {
+            subqueryColumns = new ArrayList<>();
+        }
+        if (tableAliases == null) {
+            tableAliases = new java.util.HashMap<>();
+        }
         System.out.println("QueryExecutor.select() - orderByColumns: " + 
             (orderByColumns == null ? "null" : (orderByColumns.isEmpty() ? "empty" : orderByColumns.size() + " items")));
         if (orderByColumns != null && !orderByColumns.isEmpty()) {
@@ -74,7 +83,7 @@ public class QueryExecutor {
             }
         }
         
-        // 验证字段名（跳过聚合函数）
+        // 验证字段名（跳过聚合函数和子查询列）
         for (String colName : selectedColumns) {
             // 跳过聚合函数
             if (colName.toUpperCase().startsWith("COUNT(") || 
@@ -82,6 +91,10 @@ public class QueryExecutor {
                 colName.toUpperCase().startsWith("AVG(") ||
                 colName.toUpperCase().startsWith("MAX(") ||
                 colName.toUpperCase().startsWith("MIN(")) {
+                continue;
+            }
+            // 跳过于查询列标记
+            if (colName.equals("__SUBQUERY__")) {
                 continue;
             }
             // 支持 table.column 格式
@@ -133,14 +146,38 @@ public class QueryExecutor {
             List<List<Object>> resultData = new ArrayList<>();
             for (Record record : filteredRecords) {
                 List<Object> row = new ArrayList<>();
-                for (String colName : selectedColumns) {
-                    // 支持 table.column 格式
-                    String actualColName = colName;
-                    if (colName.contains(".")) {
-                        String[] parts = colName.split("\\.", 2);
-                        actualColName = parts[1];
+                // 构建当前行的数据（用于子查询中的相关引用）
+                List<Object> currentRow = new ArrayList<>();
+                for (Field field : table.getFields()) {
+                    currentRow.add(record.getValue(table, field.getName()));
+                }
+                List<Table> currentTables = new ArrayList<>();
+                currentTables.add(table);
+                
+                for (int i = 0; i < selectedColumns.size(); i++) {
+                    String colName = selectedColumns.get(i);
+                    
+                    // 检查是否是子查询列
+                    if (colName.equals("__SUBQUERY__") && subqueryColumns != null && 
+                        i < subqueryColumns.size() && subqueryColumns.get(i) != null) {
+                        // 执行子查询
+                        SQLParser.SelectStatement subquery = subqueryColumns.get(i);
+                        QueryResult subqueryResult = executeSubqueryWithContext(subquery, currentRow, currentTables, tableAliases);
+                        // 子查询应该返回单个值（标量子查询）
+                        if (subqueryResult.getRowCount() > 0 && subqueryResult.getData().get(0).size() > 0) {
+                            row.add(subqueryResult.getData().get(0).get(0));
+                        } else {
+                            row.add(null);
+                        }
+                    } else {
+                        // 普通列或聚合函数
+                        String actualColName = colName;
+                        if (colName.contains(".")) {
+                            String[] parts = colName.split("\\.", 2);
+                            actualColName = parts[1];
+                        }
+                        row.add(record.getValue(table, actualColName));
                     }
-                    row.add(record.getValue(table, actualColName));
                 }
                 resultData.add(row);
             }
@@ -170,7 +207,8 @@ public class QueryExecutor {
                            SQLParser.WhereCondition whereCondition,
                            List<String> groupByColumns,
                            java.util.Map<String, String> tableAliases,
-                           List<SQLParser.OrderByItem> orderByColumns) {
+                           List<SQLParser.OrderByItem> orderByColumns,
+                           List<SQLParser.SelectStatement> subqueryColumns) {
         if (tableNames.size() < 2) {
             throw new DBMSException("Join requires at least 2 tables");
         }
@@ -517,25 +555,48 @@ public class QueryExecutor {
      * 从完整行中提取指定列的值（支持 alias.column 格式）
      */
     private Object extractColumnValue(String colName, List<Object> fullRow, List<Table> tables) {
+        return extractColumnValue(colName, fullRow, tables, null);
+    }
+    
+    private Object extractColumnValue(String colName, List<Object> fullRow, List<Table> tables, 
+                                     java.util.Map<String, String> tableAliases) {
         if (colName.contains(".")) {
             // 格式：alias.column 或 table.column
             String[] parts = colName.split("\\.", 2);
             String tableRef = parts[0];
             String columnName = parts[1];
             
-            // 查找表
+            // 查找表（先通过表别名，再按表名）
             Table targetTable = null;
             int colOffset = 0;
-            for (Table table : tables) {
-                if (table.getName().equals(tableRef) || table.getName().equals(tableRef)) {
-                    targetTable = table;
-                    break;
+            
+            // 首先尝试通过表别名查找
+            if (tableAliases != null && tableAliases.containsKey(tableRef)) {
+                String actualTableName = tableAliases.get(tableRef);
+                colOffset = 0;
+                for (Table table : tables) {
+                    if (table.getName().equals(actualTableName)) {
+                        targetTable = table;
+                        break;
+                    }
+                    colOffset += table.getFieldCount();
                 }
-                colOffset += table.getFieldCount();
             }
             
+            // 如果没找到，尝试按表名查找
             if (targetTable == null) {
-                // 可能是别名，尝试在所有表中查找
+                colOffset = 0;
+                for (Table table : tables) {
+                    if (table.getName().equals(tableRef)) {
+                        targetTable = table;
+                        break;
+                    }
+                    colOffset += table.getFieldCount();
+                }
+            }
+            
+            // 如果还是没找到，可能是列名匹配（无表前缀的情况）
+            if (targetTable == null) {
                 for (Table table : tables) {
                     Field field = table.getFieldByName(columnName);
                     if (field != null) {
@@ -653,8 +714,8 @@ public class QueryExecutor {
             rowValue = row.get(resultIndex);
         }
         
-        // 处理IN子查询
-        if (condition.operator.equals("IN") && condition.subquery != null) {
+        // 处理IN和NOT IN子查询
+        if ((condition.operator.equals("IN") || condition.operator.equals("NOT IN")) && condition.subquery != null) {
             // 执行子查询
             QueryResult subqueryResult = executeSubquery(condition.subquery);
             // 检查rowValue是否在子查询结果中
@@ -662,15 +723,18 @@ public class QueryExecutor {
                 return false;  // NULL值不在任何集合中
             }
             // 检查子查询结果的第一列（通常IN子查询只返回一列）
+            boolean found = false;
             for (List<Object> subRow : subqueryResult.getData()) {
                 if (!subRow.isEmpty()) {
                     Object subValue = subRow.get(0);
                     if (compareValues(rowValue, subValue) == 0) {
-                        return true;
+                        found = true;
+                        break;
                     }
                 }
             }
-            return false;
+            // 对于IN，返回found；对于NOT IN，返回!found
+            return condition.operator.equals("IN") ? found : !found;
         }
         
         // 处理条件值可能是另一个表的列的情况（table.column格式）
@@ -728,13 +792,123 @@ public class QueryExecutor {
         // 使用QueryExecutor的方法执行子查询
         if (subquery.tableNames.size() == 1) {
             return select(subquery.tableNames.get(0), subquery.columnNames, 
-                         subquery.whereCondition, subquery.groupByColumns, subquery.orderByColumns);
+                         subquery.whereCondition, subquery.groupByColumns, subquery.orderByColumns,
+                         null, null);
         } else if (subquery.tableNames.size() >= 2) {
             return join(subquery.tableNames, subquery.columnNames, 
                        subquery.joinConditions, subquery.whereCondition, 
-                       subquery.groupByColumns, subquery.tableAliases, subquery.orderByColumns);
+                       subquery.groupByColumns, subquery.tableAliases, subquery.orderByColumns,
+                       null);
         } else {
             throw new DBMSException("Subquery must specify at least one table");
+        }
+    }
+    
+    /**
+     * 执行相关子查询（带上下文信息，用于子查询列）
+     */
+    private QueryResult executeSubqueryWithContext(SQLParser.SelectStatement subquery,
+                                                    List<Object> outerRow,
+                                                    List<Table> outerTables,
+                                                    java.util.Map<String, String> outerTableAliases) {
+        // 调试输出
+        System.out.println("执行子查询，外层表别名: " + outerTableAliases);
+        System.out.println("外层行数据: " + outerRow);
+        
+        // 创建子查询的WHERE条件，将外层查询的列引用替换为实际值
+        SQLParser.WhereCondition modifiedWhereCondition = substituteOuterReferences(
+            subquery.whereCondition, outerRow, outerTables, outerTableAliases);
+        
+        // 使用修改后的WHERE条件执行子查询
+        if (subquery.tableNames.size() == 1) {
+            return select(subquery.tableNames.get(0), subquery.columnNames, 
+                         modifiedWhereCondition, subquery.groupByColumns, subquery.orderByColumns,
+                         null, null);
+        } else if (subquery.tableNames.size() >= 2) {
+            return join(subquery.tableNames, subquery.columnNames, 
+                       subquery.joinConditions, modifiedWhereCondition, 
+                       subquery.groupByColumns, subquery.tableAliases, subquery.orderByColumns,
+                       null);
+        } else {
+            throw new DBMSException("Subquery must specify at least one table");
+        }
+    }
+    
+    /**
+     * 替换子查询WHERE条件中的外层查询列引用为实际值
+     */
+    private SQLParser.WhereCondition substituteOuterReferences(
+            SQLParser.WhereCondition whereCondition,
+            List<Object> outerRow,
+            List<Table> outerTables,
+            java.util.Map<String, String> outerTableAliases) {
+        if (whereCondition == null) {
+            return null;
+        }
+        
+        if (whereCondition.isLeaf) {
+            // 叶子节点：单个条件
+            DMLExecutor.QueryCondition condition = whereCondition.condition;
+            if (condition != null) {
+                DMLExecutor.QueryCondition newCondition = condition;
+                boolean modified = false;
+                
+                // 检查列名是否是外层查询的列（如 s.id）
+                if (condition.columnName != null && condition.columnName.contains(".")) {
+                    String[] parts = condition.columnName.split("\\.", 2);
+                    String alias = parts[0];
+                    
+                    // 检查是否是外层查询的表别名
+                    if (outerTableAliases != null && outerTableAliases.containsKey(alias)) {
+                        // 从外层行中提取值
+                        Object value = extractColumnValue(condition.columnName, outerRow, outerTables, outerTableAliases);
+                        System.out.println("替换外层列引用（列名）: " + condition.columnName + " -> " + value);
+                        // 创建新的条件，将列名替换为值
+                        newCondition = new DMLExecutor.QueryCondition(
+                            condition.columnName, condition.operator, value);
+                        modified = true;
+                    }
+                }
+                
+                // 检查值是否是外层查询的列引用（如 s.id 在等号右侧）
+                if (condition.value != null && condition.value instanceof String) {
+                    String valueStr = (String) condition.value;
+                    // 检查是否是 table.column 格式且不是字符串字面量
+                    if (valueStr.contains(".") && !valueStr.startsWith("'") && !valueStr.endsWith("'")) {
+                        String[] parts = valueStr.split("\\.", 2);
+                        String alias = parts[0];
+                        
+                        // 检查是否是外层查询的表别名
+                        if (outerTableAliases != null && outerTableAliases.containsKey(alias)) {
+                            // 从外层行中提取值
+                            Object actualValue = extractColumnValue(valueStr, outerRow, outerTables, outerTableAliases);
+                            System.out.println("替换外层列引用（值）: " + valueStr + " -> " + actualValue);
+                            // 创建新的条件，将值替换为实际值
+                            if (modified) {
+                                // 如果列名也被修改了，使用已修改的条件
+                                newCondition = new DMLExecutor.QueryCondition(
+                                    newCondition.columnName, newCondition.operator, actualValue);
+                            } else {
+                                newCondition = new DMLExecutor.QueryCondition(
+                                    condition.columnName, condition.operator, actualValue);
+                            }
+                            modified = true;
+                        }
+                    }
+                }
+                
+                if (modified) {
+                    return new SQLParser.WhereCondition(newCondition);
+                }
+            }
+            return whereCondition;
+        } else {
+            // 组合条件：递归处理左右子树
+            SQLParser.WhereCondition left = substituteOuterReferences(
+                whereCondition.left, outerRow, outerTables, outerTableAliases);
+            SQLParser.WhereCondition right = substituteOuterReferences(
+                whereCondition.right, outerRow, outerTables, outerTableAliases);
+            return new SQLParser.WhereCondition(left, whereCondition.logicOp, right);
         }
     }
     
