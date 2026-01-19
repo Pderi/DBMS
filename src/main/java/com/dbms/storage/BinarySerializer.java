@@ -2,6 +2,7 @@ package com.dbms.storage;
 
 import com.dbms.model.Field;
 import com.dbms.model.FieldType;
+import com.dbms.model.Index;
 import com.dbms.model.Table;
 
 import java.io.*;
@@ -120,6 +121,16 @@ public class BinarySerializer {
         }
         writeInt(dos, table.getRecordCount());
         writeLong(dos, table.getLastModified());
+        
+        // 写入索引信息
+        if (table.getIndexes() != null) {
+            writeInt(dos, table.getIndexes().size());
+            for (Index index : table.getIndexes().values()) {
+                writeIndex(dos, index);
+            }
+        } else {
+            writeInt(dos, 0);
+        }
     }
     
     /**
@@ -136,7 +147,42 @@ public class BinarySerializer {
         table.setFields(fields);
         table.setRecordCount(readInt(dis));
         table.setLastModified(readLong(dis));
+        
+        // 读取索引信息（向后兼容：旧文件可能没有索引信息）
+        try {
+            int indexCount = readInt(dis);
+            for (int i = 0; i < indexCount; i++) {
+                Index index = readIndex(dis);
+                table.addIndex(index);
+            }
+        } catch (java.io.EOFException e) {
+            // 旧文件格式没有索引信息，跳过
+            // 索引列表初始化为空即可
+        }
+        
         return table;
+    }
+    
+    /**
+     * 写入索引信息
+     */
+    public static void writeIndex(DataOutputStream dos, Index index) throws IOException {
+        writeString(dos, index.getIndexName());
+        writeString(dos, index.getTableName());
+        writeString(dos, index.getColumnName());
+        dos.writeBoolean(index.isUnique());
+        // 注意：indexMap 不需要持久化，因为可以在需要时重新构建
+    }
+    
+    /**
+     * 读取索引信息
+     */
+    public static Index readIndex(DataInputStream dis) throws IOException {
+        String indexName = readString(dis);
+        String tableName = readString(dis);
+        String columnName = readString(dis);
+        boolean unique = dis.readBoolean();
+        return new Index(indexName, tableName, columnName, unique);
     }
     
     /**
