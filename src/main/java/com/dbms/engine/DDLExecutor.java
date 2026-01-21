@@ -163,6 +163,15 @@ public class DDLExecutor {
             throw new DBMSException("Cannot drop primary key column: " + columnName);
         }
         
+        // 如果表已有数据，禁止直接删列，避免数据文件结构错位
+        try {
+            if (hasTableData(tableName)) {
+                throw new DBMSException("Cannot drop column on non-empty table. Please export/clean data first.");
+            }
+        } catch (IOException e) {
+            throw new DBMSException("Failed to check table data file: " + e.getMessage(), e);
+        }
+        
         table.removeField(columnName);
         
         try {
@@ -217,12 +226,49 @@ public class DDLExecutor {
             throw new DBMSException("Column " + columnName + " does not exist");
         }
         
-        field.setType(newType);
+        FieldType oldType = field.getType();
+        int oldLength = field.getLength();
+        int targetLength;
         if (newLength != null) {
-            field.setLength(newLength);
+            targetLength = newLength;
         } else if (newType.getDefaultLength() > 0) {
-            field.setLength(newType.getDefaultLength());
+            targetLength = newType.getDefaultLength();
+        } else {
+            targetLength = oldLength;
         }
+        
+        // 如表已有数据，仅允许“安全修改”：
+        // 1) 同类型长度放大（VARCHAR/CHAR 扩容）
+        // 2) FLOAT <-> DOUBLE 互换（同为8字节存储）
+        // 其他跨类型或缩小长度，一律阻止，避免损坏已有数据文件
+        try {
+            if (hasTableData(tableName)) {
+                boolean safe = false;
+                
+                if (oldType == newType) {
+                    if ((oldType == FieldType.VARCHAR || oldType == FieldType.CHAR)) {
+                        safe = targetLength >= oldLength; // 只允许扩容
+                    } else {
+                        safe = true; // 同类型非变长字段，认为兼容
+                    }
+                } else {
+                    // 仅允许 FLOAT <-> DOUBLE 互换（同写8字节）
+                    if ((oldType == FieldType.FLOAT && newType == FieldType.DOUBLE) ||
+                        (oldType == FieldType.DOUBLE && newType == FieldType.FLOAT)) {
+                        safe = true;
+                    }
+                }
+                
+                if (!safe) {
+                    throw new DBMSException("Cannot modify column type/length with existing data. Please export and rebuild the table.");
+                }
+            }
+        } catch (IOException e) {
+            throw new DBMSException("Failed to check table data file: " + e.getMessage(), e);
+        }
+        
+        field.setType(newType);
+        field.setLength(targetLength);
         
         try {
             DBFFileManager.updateTableInFile(dbFilePath, table);
@@ -243,6 +289,15 @@ public class DDLExecutor {
      */
     public java.util.List<String> getTableNames() {
         return database.getTableNames();
+    }
+    
+    /**
+    * 判断表是否已有数据（文件存在且长度>0）
+    */
+    private boolean hasTableData(String tableName) throws IOException {
+        String tableDataFile = com.dbms.storage.DATFileManager.getTableDataFilePath(datFilePath, tableName);
+        java.io.File dataFile = new java.io.File(tableDataFile);
+        return dataFile.exists() && dataFile.length() > 0;
     }
     
     /**

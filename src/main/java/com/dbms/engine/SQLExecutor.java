@@ -27,7 +27,9 @@ public class SQLExecutor {
         this.queryExecutor = queryExecutor;
         this.parser = new SQLParser();
         this.userManager = new UserManager();
-        this.transactionManager = new TransactionManager();
+        this.transactionManager = new TransactionManager(ddlExecutor);
+        // 让DML执行器在执行时能写事务日志
+        this.dmlExecutor.setTransactionManager(this.transactionManager);
     }
     
     public UserManager getUserManager() {

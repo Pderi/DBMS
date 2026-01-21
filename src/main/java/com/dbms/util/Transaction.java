@@ -57,13 +57,20 @@ public class Transaction {
         
         public OperationType type;
         public String tableName;
+        public String dataFilePath; // 该操作对应的表数据文件路径（用于回滚）
         public Object oldValue;  // 用于回滚
         public Object newValue;  // 新值
         public long recordPosition;  // 记录位置（用于UPDATE/DELETE）
         
-        public TransactionOperation(OperationType type, String tableName, Object oldValue, Object newValue, long recordPosition) {
+        public TransactionOperation(OperationType type,
+                                    String tableName,
+                                    String dataFilePath,
+                                    Object oldValue,
+                                    Object newValue,
+                                    long recordPosition) {
             this.type = type;
             this.tableName = tableName;
+            this.dataFilePath = dataFilePath;
             this.oldValue = oldValue;
             this.newValue = newValue;
             this.recordPosition = recordPosition;

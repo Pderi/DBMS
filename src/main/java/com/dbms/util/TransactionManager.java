@@ -16,9 +16,22 @@ import java.util.UUID;
 public class TransactionManager {
     private Map<String, Transaction> activeTransactions;
     private Transaction currentTransaction;
+    private com.dbms.engine.DDLExecutor ddlExecutor; // 用于回滚时获取表结构
     
     public TransactionManager() {
         this.activeTransactions = new HashMap<>();
+    }
+    
+    public TransactionManager(com.dbms.engine.DDLExecutor ddlExecutor) {
+        this();
+        this.ddlExecutor = ddlExecutor;
+    }
+    
+    /**
+     * 绑定DDL执行器（用于回滚时获取表结构）
+     */
+    public void setDDLExecutor(com.dbms.engine.DDLExecutor ddlExecutor) {
+        this.ddlExecutor = ddlExecutor;
     }
     
     /**
@@ -44,11 +57,7 @@ public class TransactionManager {
             throw new DBMSException("Transaction is not active");
         }
         
-        // 执行所有操作
-        for (Transaction.TransactionOperation op : transaction.getOperations()) {
-            // 操作已经在执行时记录，这里只需要标记为已提交
-            // 实际的数据修改已经在执行时完成
-        }
+        // 操作已经在执行时完成，这里只需要标记为已提交
         
         transaction.setStatus(Transaction.TransactionStatus.COMMITTED);
         activeTransactions.remove(transaction.getTransactionId());
@@ -89,28 +98,46 @@ public class TransactionManager {
      * 回滚单个操作
      */
     private void rollbackOperation(Transaction.TransactionOperation op) throws IOException {
+        // 回滚需要表结构（UPDATE/DELETE场景）
+        Table table = null;
+        if (ddlExecutor != null && op.tableName != null) {
+            table = ddlExecutor.getTable(op.tableName);
+        }
+        if ((op.type == Transaction.TransactionOperation.OperationType.UPDATE ||
+             op.type == Transaction.TransactionOperation.OperationType.DELETE) &&
+            table == null) {
+            throw new DBMSException("Cannot rollback " + op.type + ": table metadata not available for " + op.tableName);
+        }
+        
+        String dataFilePath = op.dataFilePath;
+        if (dataFilePath == null || dataFilePath.isEmpty()) {
+            throw new DBMSException("Cannot rollback " + op.type + ": dataFilePath is missing for table " + op.tableName);
+        }
+        
         switch (op.type) {
             case INSERT:
                 // 删除插入的记录（逻辑删除）
-                String insertDatFile = com.dbms.storage.DATFileManager.getTableDataFilePath(
-                    "database.dat", op.tableName);
-                DATFileManager.deleteRecord(insertDatFile, op.recordPosition);
+                DATFileManager.deleteRecord(dataFilePath, op.recordPosition);
                 break;
             case UPDATE:
                 // 恢复旧值
-                String updateDatFile = com.dbms.storage.DATFileManager.getTableDataFilePath(
-                    "database.dat", op.tableName);
                 if (op.oldValue instanceof Record) {
-                    Table table = null; // 需要从数据库获取表结构
-                    DATFileManager.writeRecordAt(updateDatFile, op.recordPosition, 
+                    DATFileManager.writeRecordAt(dataFilePath, op.recordPosition,
                         (Record) op.oldValue, table);
                 }
                 break;
             case DELETE:
-                // 恢复删除的记录（标记为未删除）
-                String deleteDatFile = com.dbms.storage.DATFileManager.getTableDataFilePath(
-                    "database.dat", op.tableName);
-                // 需要读取记录并恢复
+                // 恢复删除的记录：将旧记录写回（会写回ACTIVE状态+字段值）
+                if (op.oldValue instanceof Record) {
+                    DATFileManager.writeRecordAt(dataFilePath, op.recordPosition,
+                        (Record) op.oldValue, table);
+                } else {
+                    // 最低限度：取消逻辑删除标记
+                    try (java.io.RandomAccessFile raf = new java.io.RandomAccessFile(dataFilePath, "rw")) {
+                        raf.seek(op.recordPosition);
+                        raf.writeInt(com.dbms.storage.FileFormat.RECORD_ACTIVE);
+                    }
+                }
                 break;
             default:
                 // CREATE_TABLE, DROP_TABLE, ALTER_TABLE等DDL操作
@@ -132,6 +159,16 @@ public class TransactionManager {
     public boolean hasActiveTransaction() {
         return currentTransaction != null && 
                currentTransaction.getStatus() == Transaction.TransactionStatus.ACTIVE;
+    }
+    
+    /**
+     * 记录事务操作（由DML/DDL执行器在执行时调用）
+     */
+    public void recordOperation(Transaction.TransactionOperation operation) {
+        if (!hasActiveTransaction()) {
+            return;
+        }
+        currentTransaction.addOperation(operation);
     }
 }
 
