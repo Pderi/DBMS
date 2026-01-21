@@ -1,6 +1,7 @@
 package com.dbms.engine;
 
 import com.dbms.model.Field;
+import com.dbms.model.Index;
 import com.dbms.model.Record;
 import com.dbms.model.Table;
 import com.dbms.parser.SQLParser;
@@ -111,7 +112,12 @@ public class QueryExecutor {
         try {
             String tableDataFile = getTableDataFilePath(tableName);
             System.out.println("SELECT: 从文件读取数据: " + tableDataFile);
-            List<Record> allRecords = DATFileManager.readAllRecords(tableDataFile, table);
+            
+            // 优先尝试使用索引获取记录（仅支持单表等值查询）
+            List<Record> allRecords = tryReadUsingIndex(table, whereCondition, tableDataFile);
+            if (allRecords == null) {
+                allRecords = DATFileManager.readAllRecords(tableDataFile, table);
+            }
             System.out.println("SELECT: 读取到 " + allRecords.size() + " 条记录");
             
             // 过滤记录
@@ -661,6 +667,61 @@ public class QueryExecutor {
             } else {  // OR
                 return leftResult || rightResult;
             }
+        }
+    }
+    
+    /**
+     * 尝试使用索引获取记录（仅支持单表、单一等值条件）
+     * 返回 null 表示无法使用索引，调用方应退回全表扫描
+     */
+    private List<Record> tryReadUsingIndex(Table table, SQLParser.WhereCondition whereCondition, String tableDataFile) {
+        try {
+            if (whereCondition == null || !whereCondition.isLeaf || whereCondition.condition == null) {
+                return null;
+            }
+            DMLExecutor.QueryCondition cond = whereCondition.condition;
+            if (!"=".equals(cond.operator)) {
+                return null;
+            }
+            // 排除“列=列”的情况（value 是 table.column 的字符串）
+            if (cond.value instanceof String) {
+                String v = (String) cond.value;
+                if (v.contains(".") && !v.startsWith("'") && !v.endsWith("'")) {
+                    return null;
+                }
+            }
+            // 解析列名（去除表前缀）
+            String colName = cond.columnName;
+            if (colName.contains(".")) {
+                String[] parts = colName.split("\\.", 2);
+                colName = parts[1];
+            }
+            Index idx = table.getIndexByColumn(colName);
+            if (idx == null) {
+                return null;
+            }
+            List<Long> positions = idx.find(cond.value);
+            if (positions == null || positions.isEmpty()) {
+                return new ArrayList<>(); // 索引命中为空
+            }
+            List<Record> records = new ArrayList<>();
+            for (Long pos : positions) {
+                if (pos == null) continue;
+                try {
+                    Record r = DATFileManager.readRecordAt(tableDataFile, pos, table);
+                    if (r != null && !r.isDeleted()) {
+                        records.add(r);
+                    }
+                } catch (IOException e) {
+                    // 单条读取失败时忽略该条
+                    System.err.println("Index read failed at position " + pos + ": " + e.getMessage());
+                }
+            }
+            return records;
+        } catch (Exception e) {
+            // 任何异常都回退全表扫描
+            System.err.println("tryReadUsingIndex fallback to full scan: " + e.getMessage());
+            return null;
         }
     }
     

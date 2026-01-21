@@ -1,6 +1,7 @@
 package com.dbms.engine;
 
 import com.dbms.model.Field;
+import com.dbms.model.Index;
 import com.dbms.model.Record;
 import com.dbms.model.Table;
 import com.dbms.storage.DATFileManager;
@@ -19,10 +20,76 @@ public class DMLExecutor {
     
     private DDLExecutor ddlExecutor;
     private String baseDatFilePath;  // 基础数据文件路径（用于生成表特定的路径）
+    private com.dbms.util.TransactionManager transactionManager; // 可选：用于事务日志
     
     public DMLExecutor(DDLExecutor ddlExecutor, String baseDatFilePath) {
         this.ddlExecutor = ddlExecutor;
         this.baseDatFilePath = baseDatFilePath;
+    }
+    
+    /**
+     * 注入事务管理器（由SQLExecutor构造时绑定）
+     */
+    public void setTransactionManager(com.dbms.util.TransactionManager transactionManager) {
+        this.transactionManager = transactionManager;
+    }
+    
+    private Record shallowCopyRecord(Record record) {
+        Record copy = new Record(record.getValueCount());
+        copy.setValues(new java.util.ArrayList<>(record.getValues()));
+        copy.setDeleted(record.isDeleted());
+        copy.setRecordId(record.getRecordId());
+        return copy;
+    }
+    
+    /**
+     * 索引维护：插入
+     */
+    private void updateIndexesOnInsert(Table table, Record record, long position) {
+        if (table.getIndexes() == null || table.getIndexes().isEmpty()) {
+            return;
+        }
+        for (Index idx : table.getIndexes().values()) {
+            Object v = record.getValue(table, idx.getColumnName());
+            if (v != null) {
+                idx.addIndexEntry(v, position);
+            }
+        }
+    }
+    
+    /**
+     * 索引维护：删除
+     */
+    private void updateIndexesOnDelete(Table table, Record record, long position) {
+        if (table.getIndexes() == null || table.getIndexes().isEmpty()) {
+            return;
+        }
+        for (Index idx : table.getIndexes().values()) {
+            Object v = record.getValue(table, idx.getColumnName());
+            if (v != null) {
+                idx.removeIndexEntry(v, position);
+            }
+        }
+    }
+    
+    /**
+     * 索引维护：更新（先删旧值，再加新值）
+     */
+    private void updateIndexesOnUpdate(Table table, Record oldRecord, Record newRecord, long position) {
+        if (table.getIndexes() == null || table.getIndexes().isEmpty()) {
+            return;
+        }
+        for (Index idx : table.getIndexes().values()) {
+            String col = idx.getColumnName();
+            Object oldV = oldRecord.getValue(table, col);
+            Object newV = newRecord.getValue(table, col);
+            if (oldV != null) {
+                idx.removeIndexEntry(oldV, position);
+            }
+            if (newV != null) {
+                idx.addIndexEntry(newV, position);
+            }
+        }
     }
     
     /**
@@ -197,7 +264,20 @@ public class DMLExecutor {
         try {
             String tableDataFile = getTableDataFilePath(tableName);
             System.out.println("INSERT: 写入数据到文件: " + tableDataFile);
-            DATFileManager.appendRecord(tableDataFile, record, table);
+            long position = DATFileManager.appendRecord(tableDataFile, record, table);
+            // 维护索引
+            updateIndexesOnInsert(table, record, position);
+            // 事务日志：INSERT（回滚时逻辑删除该位置）
+            if (transactionManager != null && transactionManager.hasActiveTransaction()) {
+                transactionManager.recordOperation(new com.dbms.util.Transaction.TransactionOperation(
+                    com.dbms.util.Transaction.TransactionOperation.OperationType.INSERT,
+                    tableName,
+                    tableDataFile,
+                    null,
+                    shallowCopyRecord(record),
+                    position
+                ));
+            }
             System.out.println("INSERT: 数据写入成功");
             // 更新表的记录计数
             table.setRecordCount(table.getRecordCount() + 1);
@@ -254,7 +334,20 @@ public class DMLExecutor {
         // 写入文件
         try {
             String tableDataFile = getTableDataFilePath(tableName);
-            DATFileManager.appendRecord(tableDataFile, record, table);
+            long position = DATFileManager.appendRecord(tableDataFile, record, table);
+            // 维护索引
+            updateIndexesOnInsert(table, record, position);
+            // 事务日志：INSERT
+            if (transactionManager != null && transactionManager.hasActiveTransaction()) {
+                transactionManager.recordOperation(new com.dbms.util.Transaction.TransactionOperation(
+                    com.dbms.util.Transaction.TransactionOperation.OperationType.INSERT,
+                    tableName,
+                    tableDataFile,
+                    null,
+                    shallowCopyRecord(record),
+                    position
+                ));
+            }
             table.setRecordCount(table.getRecordCount() + 1);
         } catch (IOException e) {
             throw new DBMSException("Failed to insert record: " + e.getMessage(), e);
@@ -296,6 +389,19 @@ public class DMLExecutor {
                     // 检查位置索引是否有效（防御性编程）
                     if (i < positions.size()) {
                         long position = positions.get(i);
+                        // 维护索引：删除对应值
+                        updateIndexesOnDelete(table, record, position);
+                        // 事务日志：DELETE（回滚时写回旧记录）
+                        if (transactionManager != null && transactionManager.hasActiveTransaction()) {
+                            transactionManager.recordOperation(new com.dbms.util.Transaction.TransactionOperation(
+                                com.dbms.util.Transaction.TransactionOperation.OperationType.DELETE,
+                                tableName,
+                                tableDataFile,
+                                shallowCopyRecord(record),
+                                null,
+                                position
+                            ));
+                        }
                         DATFileManager.deleteRecord(tableDataFile, position);
                         deletedCount++;
                     } else {
@@ -341,6 +447,9 @@ public class DMLExecutor {
             for (int i = 0; i < records.size(); i++) {
                 Record record = records.get(i);
                 if (!record.isDeleted() && (condition == null || condition.matches(record, table))) {
+                    // 记录旧值（用于索引维护和可选的事务日志）
+                    Record oldRecordCopy = shallowCopyRecord(record);
+                    
                     // 更新字段值
                     for (int j = 0; j < columnNames.size(); j++) {
                         String columnName = columnNames.get(j);
@@ -472,9 +581,33 @@ public class DMLExecutor {
                     if (i < positions.size()) {
                         long position = positions.get(i);
                         DATFileManager.writeRecordAt(tableDataFile, position, record, table);
+                        // 维护索引：按旧值/新值更新
+                        updateIndexesOnUpdate(table, oldRecordCopy == null ? record : oldRecordCopy, record, position);
+                        // 写日志（在写回成功之后记录新值）
+                        if (transactionManager != null && transactionManager.hasActiveTransaction() && oldRecordCopy != null) {
+                            transactionManager.recordOperation(new com.dbms.util.Transaction.TransactionOperation(
+                                com.dbms.util.Transaction.TransactionOperation.OperationType.UPDATE,
+                                tableName,
+                                tableDataFile,
+                                oldRecordCopy,
+                                shallowCopyRecord(record),
+                                position
+                            ));
+                        }
                     } else {
                         // 如果位置列表不匹配，追加记录
-                        DATFileManager.appendRecord(tableDataFile, record, table);
+                        long newPos = DATFileManager.appendRecord(tableDataFile, record, table);
+                        // 追加写入时，回滚时按INSERT处理（逻辑删除）
+                        if (transactionManager != null && transactionManager.hasActiveTransaction()) {
+                            transactionManager.recordOperation(new com.dbms.util.Transaction.TransactionOperation(
+                                com.dbms.util.Transaction.TransactionOperation.OperationType.INSERT,
+                                tableName,
+                                tableDataFile,
+                                null,
+                                shallowCopyRecord(record),
+                                newPos
+                            ));
+                        }
                     }
                     updatedCount++;
                 }
