@@ -12,6 +12,7 @@ import com.dbms.util.Validator;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 
 /**
  * DML执行器 - 处理数据操纵语言（INSERT, UPDATE, DELETE）
@@ -40,6 +41,72 @@ public class DMLExecutor {
         copy.setDeleted(record.isDeleted());
         copy.setRecordId(record.getRecordId());
         return copy;
+    }
+
+    /**
+     * 获取主键字段列表
+     */
+    private List<Field> getPrimaryKeyFields(Table table) {
+        return table.getKeyFields(); // Table 已提供 key 过滤
+    }
+
+    /**
+     * 检查主键非空
+     */
+    private void ensurePrimaryKeyNonNull(Record record, Table table, List<Field> pkFields) {
+        if (pkFields == null || pkFields.isEmpty()) {
+            return;
+        }
+        for (Field f : pkFields) {
+            Object v = record.getValue(table, f.getName());
+            if (v == null) {
+                throw new DBMSException("Primary key field '" + f.getName() + "' cannot be NULL");
+            }
+        }
+    }
+
+    /**
+     * 检查主键唯一（excludePosition 用于 UPDATE 时跳过自身）
+     */
+    private void ensurePrimaryKeyUnique(Table table, Record record, Long excludePosition) {
+        List<Field> pkFields = getPrimaryKeyFields(table);
+        if (pkFields == null || pkFields.isEmpty()) {
+            return;
+        }
+
+        // 构造当前记录的主键值列表
+        List<Object> pkValues = new ArrayList<>();
+        for (Field f : pkFields) {
+            pkValues.add(record.getValue(table, f.getName()));
+        }
+
+        String tableDataFile = getTableDataFilePath(table.getName());
+        try {
+            List<Record> records = DATFileManager.readAllRecords(tableDataFile, table);
+            List<Long> positions = getRecordPositions(tableDataFile, table);
+            int n = Math.min(records.size(), positions.size());
+            for (int i = 0; i < n; i++) {
+                Long pos = positions.get(i);
+                if (excludePosition != null && Objects.equals(pos, excludePosition)) {
+                    continue; // 跳过自身（UPDATE 场景）
+                }
+                Record r = records.get(i);
+                boolean same = true;
+                for (int k = 0; k < pkFields.size(); k++) {
+                    Field f = pkFields.get(k);
+                    Object rv = r.getValue(table, f.getName());
+                    if (!Objects.equals(rv, pkValues.get(k))) {
+                        same = false;
+                        break;
+                    }
+                }
+                if (same) {
+                    throw new DBMSException("Duplicate primary key detected: " + pkValues);
+                }
+            }
+        } catch (IOException e) {
+            throw new DBMSException("Failed to check primary key uniqueness: " + e.getMessage(), e);
+        }
     }
     
     /**
@@ -259,6 +326,10 @@ public class DMLExecutor {
         
         // 验证记录
         Validator.validateRecord(record, table);
+        // 主键非空 & 唯一性
+        List<Field> pkFields = getPrimaryKeyFields(table);
+        ensurePrimaryKeyNonNull(record, table, pkFields);
+        ensurePrimaryKeyUnique(table, record, null);
         
         // 写入文件
         try {
@@ -449,6 +520,7 @@ public class DMLExecutor {
                 if (!record.isDeleted() && (condition == null || condition.matches(record, table))) {
                     // 记录旧值（用于索引维护和可选的事务日志）
                     Record oldRecordCopy = shallowCopyRecord(record);
+                    List<Field> pkFields = getPrimaryKeyFields(table);
                     
                     // 更新字段值
                     for (int j = 0; j < columnNames.size(); j++) {
@@ -573,7 +645,12 @@ public class DMLExecutor {
                         
                         record.setValue(fieldIndex, value);
                     }
-                    
+
+                    // 主键非空 & 唯一性（基于更新后的记录，排除自身位置）
+                    ensurePrimaryKeyNonNull(record, table, pkFields);
+                    long selfPos = i < positions.size() ? positions.get(i) : -1;
+                    ensurePrimaryKeyUnique(table, record, selfPos >= 0 ? selfPos : null);
+
                     // 验证记录
                     Validator.validateRecord(record, table);
                     
